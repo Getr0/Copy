@@ -21,7 +21,6 @@ import concurrent.futures # Vráceno - používá se v _shutdown_client
 # --- Konfigurace ---
 API_ID = 24670509
 API_HASH = '0ca1de09bc2b41dfd98168b84cc88d7b'
-# GEMINI_API_KEY = "AIzaSyBySyxVz3mbmcTvFN-Z8MPTee5ANnCSeKE" # <-- Odstraněno
 DB_NAME = 'signals.db'
 SESSIONS_DIR = 'sessions'
 LOGGING_LEVEL = logging.INFO
