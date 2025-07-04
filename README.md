@@ -1,2 +1,0 @@
-# Copy
-Smart Copy Bot
