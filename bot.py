@@ -82,14 +82,24 @@ def init_db():
                            sl_value_type TEXT,
                            tp_value_type TEXT,
                            tp2_value REAL,
-                           tp2_value_type TEXT
+                           tp2_value_type TEXT,
+                           be_active TEXT DEFAULT 'FALSE',
+                           ts_active TEXT DEFAULT 'FALSE',
+                           be_trigger_condition_type TEXT,
+                           be_trigger_target_ticket INTEGER,
+                           ts_trigger_condition_type TEXT,
+                           ts_trigger_target_ticket INTEGER,
+                           ts_start_pips REAL,
+                           ts_step_pips REAL,
+                           ts_distance_pips REAL,
+                           is_tp1_for_be_ts TEXT DEFAULT 'FALSE'
                            )''')
-            logging.info("Nová tabulka 'signals' vytvořena s novou strukturou.")
+            logging.info("Nová tabulka 'signals' vytvořena s novou strukturou (včetně BE/TS polí).")
         else:
             c.execute("PRAGMA table_info(signals)")
             columns = [row[1] for row in c.fetchall()]
-            if 'signal_type' not in columns:
-                logging.warning("Detekována stará struktura tabulky 'signals'. Přejmenovávám na 'signals_old' a vytvářím novou.")
+            if 'signal_type' not in columns or 'be_active' not in columns: # Check for one of old and one of new
+                logging.warning("Detekována stará struktura tabulky 'signals' nebo chybí BE/TS pole. Přejmenovávám na 'signals_old' a vytvářím novou.")
                 try:
                     c.execute("ALTER TABLE signals RENAME TO signals_old")
                     logging.info("Stará tabulka 'signals' přejmenována na 'signals_old'.")
@@ -111,11 +121,21 @@ def init_db():
                                sl_value_type TEXT,
                                tp_value_type TEXT,
                                tp2_value REAL,
-                               tp2_value_type TEXT
+                               tp2_value_type TEXT,
+                               be_active TEXT DEFAULT 'FALSE',
+                               ts_active TEXT DEFAULT 'FALSE',
+                               be_trigger_condition_type TEXT,
+                               be_trigger_target_ticket INTEGER,
+                               ts_trigger_condition_type TEXT,
+                               ts_trigger_target_ticket INTEGER,
+                               ts_start_pips REAL,
+                               ts_step_pips REAL,
+                               ts_distance_pips REAL,
+                               is_tp1_for_be_ts TEXT DEFAULT 'FALSE'
                                )''')
-                logging.info("Nová tabulka 'signals' vytvořena po přejmenování staré.")
+                logging.info("Nová tabulka 'signals' vytvořena po přejmenování staré (včetně BE/TS polí).")
             else:
-                logging.info("Tabulka 'signals' existuje s novou strukturou, kontroluji sloupce.")
+                logging.info("Tabulka 'signals' existuje s očekávanou strukturou, kontroluji a přidávám BE/TS sloupce pokud chybí.")
                 _check_and_add_column(c, 'signals', 'status', 'TEXT')
                 _check_and_add_column(c, 'signals', 'ticket', 'INTEGER')
                 _check_and_add_column(c, 'signals', 'signal_group_id', 'TEXT')
@@ -127,9 +147,54 @@ def init_db():
                 _check_and_add_column(c, 'signals', 'tp_value_type', 'TEXT')
                 _check_and_add_column(c, 'signals', 'tp2_value', 'REAL')
                 _check_and_add_column(c, 'signals', 'tp2_value_type', 'TEXT')
+                # Add new BE/TS columns
+                _check_and_add_column(c, 'signals', 'be_active', "TEXT DEFAULT 'FALSE'")
+                _check_and_add_column(c, 'signals', 'ts_active', "TEXT DEFAULT 'FALSE'")
+                _check_and_add_column(c, 'signals', 'be_trigger_condition_type', 'TEXT')
+                _check_and_add_column(c, 'signals', 'be_trigger_target_ticket', 'INTEGER')
+                _check_and_add_column(c, 'signals', 'ts_trigger_condition_type', 'TEXT')
+                _check_and_add_column(c, 'signals', 'ts_trigger_target_ticket', 'INTEGER')
+                _check_and_add_column(c, 'signals', 'ts_start_pips', 'REAL')
+                _check_and_add_column(c, 'signals', 'ts_step_pips', 'REAL')
+                _check_and_add_column(c, 'signals', 'ts_distance_pips', 'REAL')
+                _check_and_add_column(c, 'signals', 'is_tp1_for_be_ts', "TEXT DEFAULT 'FALSE'")
 
         c.execute("DELETE FROM signals WHERE status = 'new' OR status IS NULL")
         conn.commit()
+
+        # --- Create trade_functions table ---
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS trade_functions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_db_id INTEGER,
+                ticket_id INTEGER,
+                function_type TEXT NOT NULL CHECK(function_type IN ('BE', 'TS')),
+                ts_type TEXT CHECK(ts_type IN ('CLASSIC', 'CONVERGENT')),
+                activation_condition_type TEXT NOT NULL CHECK(activation_condition_type IN ('ON_CLOSE_TICKET', 'MANUAL', 'IMMEDIATE')),
+                activation_target_ticket INTEGER,
+                is_active TEXT NOT NULL DEFAULT 'FALSE' CHECK(is_active IN ('TRUE', 'FALSE')),
+                params_json TEXT,
+                tp_target_price REAL,
+                status_message TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (signal_db_id) REFERENCES signals (id) ON DELETE CASCADE
+            )
+        ''')
+        logging.info("Tabulka 'trade_functions' zkontrolována/vytvořena.")
+
+        # Create triggers to update 'updated_at' timestamp
+        c.execute('''
+            CREATE TRIGGER IF NOT EXISTS update_trade_functions_updated_at
+            AFTER UPDATE ON trade_functions
+            FOR EACH ROW
+            BEGIN
+                UPDATE trade_functions SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id;
+            END;
+        ''')
+        logging.info("Trigger 'update_trade_functions_updated_at' zkontrolován/vytvořen.")
+        conn.commit()
+
 
 class SessionManager:
     def __init__(self, base_dir=SESSIONS_DIR):
@@ -306,19 +371,54 @@ class TelegramBotApp(ctk.CTk):
         self.client_loop, self.client_thread, self.main_client = None, None, None
         self.client_running = False
         self.monitoring_handlers, self.monitoring_states = {}, {}
-        self.parsing_methods = {}
+        self.parsing_methods = {} # Stores parsing method per channel_id
         self.channel_contexts = {}
         self.processed_message_ids = set()
         self.message_id_lock = threading.Lock()
+
+        # --- Default Function Settings Storage ---
+        # Structure: self.function_defaults[parser_type_str] = {
+        #    'be_active': BooleanVar,
+        #    'ts_active': BooleanVar,
+        #    'ts_type': StringVar, # "Classic", "Convergent"
+        #    'classic_ts_start_pips': DoubleVar, ...
+        #    'convergent_activation_start_pips': DoubleVar, ...
+        # }
+        self.function_defaults = {}
+        self._init_default_function_settings()
+
+
         self._create_widgets()
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
+    def _init_default_function_settings(self):
+        # Initialize for known parser types. Others can be added dynamically if needed.
+        parser_types = ["SniperPro", "Standardní"]
+        for p_type in parser_types:
+            self.function_defaults[p_type] = {
+                'be_active': tk.BooleanVar(value=True),
+                'ts_active': tk.BooleanVar(value=True),
+                'ts_type': tk.StringVar(value="Classic"), # Default to Classic
+                # Classic TS params
+                'classic_ts_start_pips': tk.DoubleVar(value=20.0),
+                'classic_ts_step_pips': tk.DoubleVar(value=10.0),
+                'classic_ts_distance_pips': tk.DoubleVar(value=15.0),
+                # Convergent TS params
+                'convergent_activation_start_pips': tk.DoubleVar(value=30.0),
+                'convergent_converge_factor': tk.DoubleVar(value=0.5), # Range 0-1
+                'convergent_min_stop_distance_pips': tk.DoubleVar(value=10.0)
+            }
+
     def _create_widgets(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(3, weight=1) # Adjusted row for channels_list_frame
 
-        login_frame = ctk.CTkFrame(self, fg_color=self.FRAME_COLOR, corner_radius=8)
-        login_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=(15,10))
+        # --- Top Controls Frame (Login & Main Buttons) ---
+        top_controls_frame = ctk.CTkFrame(self, fg_color="transparent")
+        top_controls_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=(15,10))
+
+        login_frame = ctk.CTkFrame(top_controls_frame, fg_color=self.FRAME_COLOR, corner_radius=8)
+        login_frame.pack(side="left", fill="x", expand=True, padx=(0,10))
         login_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(login_frame, text="Tel. číslo:", font=self.FONT_BOLD).grid(row=0, column=0, padx=(10,5), pady=10, sticky="w")
@@ -337,8 +437,17 @@ class TelegramBotApp(ctk.CTk):
                                        corner_radius=6, width=100)
         connect_button.grid(row=0, column=3, padx=(0,10), pady=10)
 
+        functions_button = ctk.CTkButton(top_controls_frame, text="⚙️ Funkce", command=self._show_functions_dialog,
+                                         font=self.FONT_BOLD, fg_color=self.FRAME_COLOR, hover_color=self.ENTRY_BG_COLOR,
+                                         corner_radius=6, width=120)
+        functions_button.pack(side="left", padx=(0,0), pady=10)
+
+
+        # --- BE/TS Settings Frame (REMOVED - Now part of _show_functions_dialog) ---
+
+
         channels_header_frame = ctk.CTkFrame(self, fg_color="transparent")
-        channels_header_frame.grid(row=1, column=0, sticky="ew", padx=15, pady=(10, 5))
+        channels_header_frame.grid(row=2, column=0, sticky="ew", padx=15, pady=(10, 5)) # Adjusted row
         channels_header_frame.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(channels_header_frame, text="Kanály a skupiny", font=self.FONT_TITLE, anchor="w").grid(row=0, column=0, sticky="w")
@@ -349,11 +458,11 @@ class TelegramBotApp(ctk.CTk):
         self.refresh_button.grid(row=0, column=1, sticky="e")
 
         self.channels_list_frame = ctk.CTkScrollableFrame(self, fg_color=self.FRAME_COLOR, corner_radius=8)
-        self.channels_list_frame.grid(row=2, column=0, sticky="nsew", padx=15, pady=(0,10))
+        self.channels_list_frame.grid(row=3, column=0, sticky="nsew", padx=15, pady=(0,10)) # Adjusted row
         self.channels_list_frame.grid_columnconfigure(0, weight=1)
 
         log_frame = ctk.CTkFrame(self, fg_color=self.FRAME_COLOR, corner_radius=8)
-        log_frame.grid(row=3, column=0, sticky="ew", padx=15, pady=(0,15))
+        log_frame.grid(row=4, column=0, sticky="ew", padx=15, pady=(0,15)) # Adjusted row
         log_frame.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(log_frame, text="Protokol událostí", font=self.FONT_BOLD, anchor="w").grid(row=0, column=0, padx=10, pady=(8,4), sticky="w")
@@ -871,20 +980,83 @@ class TelegramBotApp(ctk.CTk):
                 channel_context['last_signal_group_id'] = signal_group_id
 
                 self._update_log(f"SNIPERPRO INITIAL: {symbol} {action} @ {entry_price_ref}. GroupID: {signal_group_id}", "INFO")
-                self._update_log(f"HANDLER_SNIPER_INITIAL_SAVE_T1: Zpráva ID: {message_id}, GroupID: {signal_group_id}", "ERROR")
-                self._save_signal_data(
+
+                # --- Save T1 Trade ---
+                self._update_log(f"HANDLER_SNIPER_INITIAL_SAVE_T1: Zpráva ID: {message_id}, GroupID: {signal_group_id}", "DEBUG")
+                # For T1, BE/TS are typically not applied directly based on these defaults, but it's marked as a trigger.
+                t1_signal_db_id = self._save_signal_data(
                     symbol=symbol, action=action, entry_price=entry_price_ref,
                     signal_group_id=signal_group_id, trade_label="T1_AUTO",
                     signal_type=SIGNAL_TYPE_INITIAL_T1,
-                    sl_pips=DEFAULT_SL_PIPS, tp_pips=INITIAL_TRADE_1_TP_PIPS
+                    sl_pips=DEFAULT_SL_PIPS, tp_pips=INITIAL_TRADE_1_TP_PIPS,
+                    is_tp1_for_be_ts=True
                 )
-                self._update_log(f"HANDLER_SNIPER_INITIAL_SAVE_T2: Zpráva ID: {message_id}, GroupID: {signal_group_id}", "ERROR")
-                self._save_signal_data(
+
+                # --- Save T2 Trade ---
+                self._update_log(f"HANDLER_SNIPER_INITIAL_SAVE_T2: Zpráva ID: {message_id}, GroupID: {signal_group_id}", "DEBUG")
+                # For T2, apply the BE/TS defaults from UI, but they are not active yet.
+                # The activation_target_ticket for these functions will be TP1's MT4 ticket, filled later.
+                t2_signal_db_id = self._save_signal_data(
                     symbol=symbol, action=action, entry_price=entry_price_ref,
                     signal_group_id=signal_group_id, trade_label="T2_AUTO",
                     signal_type=SIGNAL_TYPE_INITIAL_T2_DEFAULT,
-                    sl_pips=DEFAULT_SL_PIPS, tp_pips=INITIAL_TRADE_2_DEFAULT_TP_PIPS
+                    sl_pips=DEFAULT_SL_PIPS, tp_pips=INITIAL_TRADE_2_DEFAULT_TP_PIPS,
+                    # Pass BE/TS activity flags based on current settings, but they are saved as inactive in trade_functions
+                    be_active=self.function_defaults["SniperPro"]['be_active'].get(),
+                    ts_active=self.function_defaults["SniperPro"]['ts_active'].get()
                 )
+
+                if t2_signal_db_id:
+                    sniper_pro_defaults = self.function_defaults["SniperPro"]
+                    # Save BE function definition for T2 if active in defaults
+                    if sniper_pro_defaults['be_active'].get():
+                        be_params = {"offset_pips": 1.0} # Example BE param, make configurable if needed
+                        self._save_trade_function_definition(
+                            signal_db_id=t2_signal_db_id, ticket_id=None,
+                            function_type="BE", ts_type=None,
+                            activation_condition_type="ON_CLOSE_TICKET", activation_target_ticket=None, # TP1 ticket unknown yet
+                            params=be_params
+                        )
+
+                    # Save TS function definition for T2 if active in defaults
+                    if sniper_pro_defaults['ts_active'].get():
+                        ts_type = sniper_pro_defaults['ts_type'].get()
+                        ts_params = {}
+                        tp2_target_price_for_convergent = None
+
+                        # Calculate TP2 price for convergent TS
+                        # Assuming INITIAL_TRADE_2_DEFAULT_TP_PIPS is used for T2's TP
+                        # This calculation might need adjustment if TP is price-based from signal
+                        if action == "BUY":
+                            tp2_target_price_for_convergent = entry_price_ref + (INITIAL_TRADE_2_DEFAULT_TP_PIPS * (PIP_SIZE_XAUUSD if symbol == "XAUUSD" else 0.0001)) # Simplified pip calc
+                        elif action == "SELL":
+                            tp2_target_price_for_convergent = entry_price_ref - (INITIAL_TRADE_2_DEFAULT_TP_PIPS * (PIP_SIZE_XAUUSD if symbol == "XAUUSD" else 0.0001))
+
+
+                        if ts_type == "Classic":
+                            ts_params = {
+                                "trail_start_pips": sniper_pro_defaults['classic_ts_start_pips'].get(),
+                                "trail_step_pips": sniper_pro_defaults['classic_ts_step_pips'].get(),
+                                "trail_distance_pips": sniper_pro_defaults['classic_ts_distance_pips'].get()
+                            }
+                        elif ts_type == "Convergent":
+                            ts_params = {
+                                "activation_start_pips": sniper_pro_defaults['convergent_activation_start_pips'].get(),
+                                "converge_factor": sniper_pro_defaults['convergent_converge_factor'].get(),
+                                "min_stop_distance_pips": sniper_pro_defaults['convergent_min_stop_distance_pips'].get()
+                                # tp_target_price is passed as a separate arg to _save_trade_function_definition
+                            }
+
+                        self._save_trade_function_definition(
+                            signal_db_id=t2_signal_db_id, ticket_id=None,
+                            function_type="TS", ts_type=ts_type,
+                            activation_condition_type="ON_CLOSE_TICKET", activation_target_ticket=None, # TP1 ticket unknown yet
+                            params=ts_params,
+                            tp_target_price=tp2_target_price_for_convergent if ts_type == "Convergent" else None
+                        )
+                else:
+                    self._update_log(f"Chyba: T2 signál pro GroupID {signal_group_id} nebyl úspěšně uložen, BE/TS funkce nebyly vytvořeny.", "ERROR")
+
 
             elif current_signal_type_from_parser == 'UPDATE_SLTP':
                 active_symbol = channel_context.get('last_initial_symbol')
@@ -1011,54 +1183,71 @@ class TelegramBotApp(ctk.CTk):
                           entry_price: float = 0,
                           sl_price: float | None = None, tp_price: float | None = None,
                           sl_pips: float | None = None, tp_pips: float | None = None,
-                          tp2_price_optional: float | None = None
+                          tp2_price_optional: float | None = None,
+                          # BE/TS parameters
+                          be_active: bool = False,
+                          ts_active: bool = False,
+                          be_trigger_condition_type: str | None = None,
+                          be_trigger_target_ticket: int | None = None,
+                          ts_trigger_condition_type: str | None = None,
+                          ts_trigger_target_ticket: int | None = None,
+                          ts_start_pips: float | None = None,
+                          ts_step_pips: float | None = None,
+                          ts_distance_pips: float | None = None,
+                          is_tp1_for_be_ts: bool = False
                           ):
 
-        sl_val = None
-        sl_val_type = None
-        tp_val = None
-        tp_val_type = None
-        tp2_val = None
+        sl_val, sl_val_type, tp_val, tp_val_type, tp2_val = None, None, None, None, None
 
-        if sl_pips is not None:
-            sl_val = sl_pips
-            sl_val_type = "PIPS"
-        elif sl_price is not None:
-            sl_val = sl_price
-            sl_val_type = "PRICE"
+        if sl_pips is not None: sl_val, sl_val_type = sl_pips, "PIPS"
+        elif sl_price is not None: sl_val, sl_val_type = sl_price, "PRICE"
 
-        if tp_pips is not None:
-            tp_val = tp_pips
-            tp_val_type = "PIPS"
-        elif tp_price is not None:
-            tp_val = tp_price
-            tp_val_type = "PRICE"
+        if tp_pips is not None: tp_val, tp_val_type = tp_pips, "PIPS"
+        elif tp_price is not None: tp_val, tp_val_type = tp_price, "PRICE"
 
-        if tp2_price_optional is not None:
-            tp2_val = tp2_price_optional
+        if tp2_price_optional is not None: tp2_val = tp2_price_optional
+
+        # Convert booleans to string "TRUE"/"FALSE" for DB
+        be_active_str = "TRUE" if be_active else "FALSE"
+        ts_active_str = "TRUE" if ts_active else "FALSE"
+        is_tp1_for_be_ts_str = "TRUE" if is_tp1_for_be_ts else "FALSE"
 
         with db_lock, sqlite3.connect(DB_NAME) as conn:
             c = conn.cursor()
             try:
-                c.execute('''INSERT INTO signals
+                sql = '''INSERT INTO signals
                              (symbol, action, entry_price, timestamp, status,
                               signal_group_id, trade_label, signal_type,
                               sl_value, tp_value, sl_value_type, tp_value_type,
-                              tp2_value, tp2_value_type)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                          (symbol, action, entry_price, datetime.datetime.now(), 'new',
+                              tp2_value, tp2_value_type,
+                              be_active, ts_active, be_trigger_condition_type, be_trigger_target_ticket,
+                              ts_trigger_condition_type, ts_trigger_target_ticket,
+                              ts_start_pips, ts_step_pips, ts_distance_pips, is_tp1_for_be_ts)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
+                params = (symbol, action, entry_price, datetime.datetime.now(), 'new',
                            signal_group_id, trade_label, signal_type,
                            sl_val, tp_val, sl_val_type, tp_val_type,
-                           tp2_val, "PRICE" if tp2_val is not None else None))
+                           tp2_val, "PRICE" if tp2_val is not None else None,
+                           be_active_str, ts_active_str, be_trigger_condition_type, be_trigger_target_ticket,
+                           ts_trigger_condition_type, ts_trigger_target_ticket,
+                           ts_start_pips, ts_step_pips, ts_distance_pips, is_tp1_for_be_ts_str)
+                c.execute(sql, params)
                 conn.commit()
-                self._update_log(f"Signál uložen do DB: {signal_type} - {symbol} {action} (Label: {trade_label}, Group: {signal_group_id})", "INFO")
+                last_id = c.lastrowid
+                self._update_log(f"Signál uložen do DB (ID: {last_id}): {signal_type} - {symbol} {action} (Label: {trade_label}, Group: {signal_group_id}, BE:{be_active_str}, TS:{ts_active_str})", "INFO")
+                return last_id # Return the ID of the newly inserted signal
             except sqlite3.Error as e:
                 log_data = {
                     "symbol": symbol, "action": action, "entry_price": entry_price,
                     "signal_group_id": signal_group_id, "trade_label": trade_label,
                     "signal_type": signal_type, "sl_val": sl_val, "tp_val": tp_val,
                     "sl_val_type": sl_val_type, "tp_val_type": tp_val_type, "tp2_val": tp2_val,
-                    "tp2_value_type_for_db": "PRICE" if tp2_val is not None else None
+                    "tp2_value_type_for_db": "PRICE" if tp2_val is not None else None,
+                    "be_active": be_active_str, "ts_active": ts_active_str,
+                    "be_trigger_condition_type": be_trigger_condition_type, "be_trigger_target_ticket": be_trigger_target_ticket,
+                    "ts_trigger_condition_type": ts_trigger_condition_type, "ts_trigger_target_ticket": ts_trigger_target_ticket,
+                    "ts_start_pips": ts_start_pips, "ts_step_pips": ts_step_pips, "ts_distance_pips": ts_distance_pips,
+                    "is_tp1_for_be_ts": is_tp1_for_be_ts_str
                 }
                 logging.error(f"Chyba při ukládání signálu do DB: {e}. Data: {log_data}")
                 self._update_log(f"Chyba DB při ukládání signálu {symbol} {action}", "ERROR")
@@ -1248,6 +1437,162 @@ class TelegramBotApp(ctk.CTk):
         self._update_log("Telegram klient a jeho vlákno byly ukončeny.", "INFO")
         self.after(0, lambda: [widget.destroy() for widget in self.channels_list_frame.winfo_children()])
 
+    def _save_trade_function_definition(self, signal_db_id: int, ticket_id: int | None,
+                                        function_type: str, ts_type: str | None,
+                                        activation_condition_type: str, activation_target_ticket: int | None,
+                                        params: dict, tp_target_price: float | None = None):
+        """Saves a function definition to the trade_functions table."""
+        params_json_str = json.dumps(params) if params else None
+        is_active_str = "FALSE" # Functions are not active by default when first defined
+
+        with db_lock, sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            try:
+                c.execute("""
+                    INSERT INTO trade_functions
+                        (signal_db_id, ticket_id, function_type, ts_type,
+                         activation_condition_type, activation_target_ticket,
+                         is_active, params_json, tp_target_price, status_message)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (signal_db_id, ticket_id, function_type, ts_type,
+                      activation_condition_type, activation_target_ticket,
+                      is_active_str, params_json_str, tp_target_price,
+                      f"Pending: {activation_condition_type} on ticket {activation_target_ticket if activation_target_ticket else 'N/A'}"))
+                conn.commit()
+                self._update_log(f"DB: Saved {function_type}{f' ({ts_type})' if ts_type else ''} function for signal_db_id {signal_db_id}. Condition: {activation_condition_type}", "INFO")
+                return c.lastrowid
+            except sqlite3.Error as e:
+                self._update_log(f"DB Error: Failed to save function {function_type} for signal_db_id {signal_db_id}: {e}", "ERROR")
+                return None
+
+
+    def _show_functions_dialog(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Výchozí Nastavení Funkcí Obchodů")
+        dialog.geometry("650x550") # Adjusted size
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(True, True) # Allow resizing
+        dialog.configure(fg_color=self.BG_COLOR)
+
+        # --- Main Frame for Content ---
+        content_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        content_frame.pack(padx=15, pady=15, fill="both", expand=True)
+        content_frame.grid_columnconfigure(1, weight=1)
+
+        # --- Parser Type Selection ---
+        ctk.CTkLabel(content_frame, text="Typ parsování:", font=self.FONT_BOLD).grid(row=0, column=0, padx=(0,5), pady=10, sticky="w")
+        self.current_parser_type_var_dialog = tk.StringVar(value=list(self.function_defaults.keys())[0] if self.function_defaults else "")
+
+        parser_type_options = list(self.function_defaults.keys())
+        if not parser_type_options: # Handle case where it might be empty initially
+            parser_type_options = ["SniperPro", "Standardní"] # Fallback if somehow empty
+
+        parser_type_dropdown = ctk.CTkComboBox(content_frame, variable=self.current_parser_type_var_dialog,
+                                                 values=parser_type_options, state="readonly",
+                                                 font=self.FONT_NORMAL, command=self._on_parser_type_selected_in_dialog)
+        parser_type_dropdown.grid(row=0, column=1, columnspan=3, padx=0, pady=10, sticky="ew")
+
+        # --- Frame for specific settings of the selected parser type ---
+        self.settings_area_frame = ctk.CTkFrame(content_frame, fg_color=self.FRAME_COLOR, corner_radius=6)
+        self.settings_area_frame.grid(row=1, column=0, columnspan=4, sticky="nsew", pady=(5,10))
+        self.settings_area_frame.grid_columnconfigure(1, weight=1) # Allow entries to expand
+        content_frame.grid_rowconfigure(1, weight=1) # Allow settings_area_frame to expand vertically
+
+
+        # --- Save Button ---
+        # save_button = ctk.CTkButton(content_frame, text="Uložit Výchozí", command=self._save_function_defaults_from_dialog, # TODO: Implement save
+        #                             font=self.FONT_BOLD, fg_color=self.ACCENT_COLOR, hover_color=self.ACCENT_HOVER_COLOR)
+        # save_button.grid(row=2, column=0, columnspan=4, pady=10, sticky="s")
+        # dialog.grid_rowconfigure(2, weight=0) # Save button at bottom
+
+        # Initial population of settings
+        self._on_parser_type_selected_in_dialog(self.current_parser_type_var_dialog.get())
+
+        dialog.attributes("-topmost", True)
+
+
+    def _on_parser_type_selected_in_dialog(self, selected_parser_type: str):
+        # Clear previous widgets in settings_area_frame
+        for widget in self.settings_area_frame.winfo_children():
+            widget.destroy()
+
+        if not selected_parser_type or selected_parser_type not in self.function_defaults:
+            ctk.CTkLabel(self.settings_area_frame, text="Vyberte platný typ parsování.", font=self.FONT_NORMAL).pack(padx=10, pady=10)
+            return
+
+        defaults = self.function_defaults[selected_parser_type]
+
+        # BE Settings
+        ctk.CTkCheckBox(self.settings_area_frame, text="Aktivovat Breakeven (pro TP2)",
+                        variable=defaults['be_active'], font=self.FONT_NORMAL,
+                        fg_color=self.ACCENT_COLOR, hover_color=self.ACCENT_HOVER_COLOR
+                       ).grid(row=0, column=0, columnspan=2, padx=10, pady=7, sticky="w")
+
+        # TS Activation and Type
+        ts_activation_check = ctk.CTkCheckBox(self.settings_area_frame, text="Aktivovat Trailing Stop (pro TP2)",
+                                             variable=defaults['ts_active'], font=self.FONT_NORMAL,
+                                             fg_color=self.ACCENT_COLOR, hover_color=self.ACCENT_HOVER_COLOR,
+                                             command=lambda: self._on_ts_type_changed_in_dialog(selected_parser_type)) # Re-render TS params on change
+        ts_activation_check.grid(row=1, column=0, padx=10, pady=7, sticky="w")
+
+        self.ts_type_dropdown_dialog = ctk.CTkComboBox(self.settings_area_frame, variable=defaults['ts_type'],
+                                                       values=["Classic", "Convergent"], state="readonly",
+                                                       font=self.FONT_NORMAL, width=150,
+                                                       command=lambda choice: self._on_ts_type_changed_in_dialog(selected_parser_type))
+        self.ts_type_dropdown_dialog.grid(row=1, column=1, padx=10, pady=7, sticky="w")
+        self.ts_type_dropdown_dialog.configure(state=tk.NORMAL if defaults['ts_active'].get() else tk.DISABLED)
+
+        # Frame for TS parameters (will be populated by _on_ts_type_changed_in_dialog)
+        self.ts_params_frame_dialog = ctk.CTkFrame(self.settings_area_frame, fg_color="transparent")
+        self.ts_params_frame_dialog.grid(row=2, column=0, columnspan=4, sticky="nsew", padx=5, pady=5)
+        self.ts_params_frame_dialog.grid_columnconfigure(1, weight=1)
+        self.ts_params_frame_dialog.grid_columnconfigure(3, weight=1)
+
+
+        self._on_ts_type_changed_in_dialog(selected_parser_type) # Initial population of TS params
+
+    def _on_ts_type_changed_in_dialog(self, selected_parser_type: str):
+        # Clear previous TS parameter widgets
+        for widget in self.ts_params_frame_dialog.winfo_children():
+            widget.destroy()
+
+        defaults = self.function_defaults[selected_parser_type]
+
+        # Update visibility of TS type dropdown
+        if hasattr(self, 'ts_type_dropdown_dialog'): # Check if it exists
+             self.ts_type_dropdown_dialog.configure(state=tk.NORMAL if defaults['ts_active'].get() else tk.DISABLED)
+
+        if not defaults['ts_active'].get():
+            return # No TS params to show if TS is not active
+
+        selected_ts_type = defaults['ts_type'].get()
+
+        if selected_ts_type == "Classic":
+            ctk.CTkLabel(self.ts_params_frame_dialog, text="Classic TS - Start (pips):", font=self.FONT_NORMAL).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+            ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['classic_ts_start_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+
+            ctk.CTkLabel(self.ts_params_frame_dialog, text="Krok (pips):", font=self.FONT_NORMAL).grid(row=0, column=2, padx=5, pady=5, sticky="w")
+            ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['classic_ts_step_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=3, padx=5, pady=5, sticky="w")
+
+            ctk.CTkLabel(self.ts_params_frame_dialog, text="Distance (pips):", font=self.FONT_NORMAL).grid(row=1, column=0, padx=5, pady=5, sticky="w")
+            ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['classic_ts_distance_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+        elif selected_ts_type == "Convergent":
+            ctk.CTkLabel(self.ts_params_frame_dialog, text="Convergent TS - Aktivace (pips):", font=self.FONT_NORMAL).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+            ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['convergent_activation_start_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=1, padx=5, pady=5, sticky="w")
+
+            ctk.CTkLabel(self.ts_params_frame_dialog, text="Converge Faktor (0-1):", font=self.FONT_NORMAL).grid(row=0, column=2, padx=5, pady=5, sticky="w")
+            ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['convergent_converge_factor'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=3, padx=5, pady=5, sticky="w")
+
+            ctk.CTkLabel(self.ts_params_frame_dialog, text="Min. odstup SL (pips):", font=self.FONT_NORMAL).grid(row=1, column=0, padx=5, pady=5, sticky="w")
+            ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['convergent_min_stop_distance_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+        # TODO: Add a "Save Defaults" button to the dialog itself, or explain that changes are live.
+        # For now, changes to these Tkinter Vars are live in self.function_defaults.
+        # A config file save/load mechanism would be good for persistence.
+
+
     def _on_closing(self):
         self._update_log("Aplikace se ukončuje...")
         if self.client_running or (self.client_thread and self.client_thread.is_alive()):
@@ -1350,24 +1695,92 @@ def report_trade():
             signal_row = c.fetchone()
 
             if not signal_row:
-                logging.warning(f"Signál ID: {db_signal_id} nenalezen v databázi pro /report_trade.")
+                logging.warning(f"/report_trade: Signál ID {db_signal_id} nenalezen.")
                 return jsonify({"status": "error", "message": f"Signal with ID {db_signal_id} not found"}), 404
 
-            if signal_row['status'] != 'new':
-                logging.warning(f"Signál ID: {db_signal_id} již byl zpracován (status: {signal_row['status']}). Požadavek ignorován.")
-                return jsonify({"status": "ok", "message": f"Signal ID {db_signal_id} already processed (status: {signal_row['status']})."}), 200
-
+            current_signal_status = signal_row['status']
             signal_type = signal_row['signal_type']
-            log_msg = ""
+            signal_group_id = signal_row['signal_group_id']
+            signal_trade_label = signal_row['trade_label']
+            is_tp1_for_be_ts_val = signal_row['is_tp1_for_be_ts'] == 'TRUE' # From signals table
 
-            if signal_type in [SIGNAL_TYPE_INITIAL_T1, SIGNAL_TYPE_INITIAL_T2_DEFAULT, SIGNAL_TYPE_RE_ENTRY, SIGNAL_TYPE_STANDARD]: # Přidán SIGNAL_TYPE_STANDARD
+            log_msg = f"/report_trade: ID:{db_signal_id}, Ticket:{ticket}, Type:{signal_type}, Label:{signal_trade_label}, Group:{signal_group_id}."
+
+            # --- Trade Closure Logic ---
+            # Adding a 'closed_in_profit' field to the JSON from EA
+            closed_in_profit = data.get('closed_in_profit') # Expects True/False or None
+
+            if closed_in_profit is not None: # This means the EA is reporting a trade closure
                 if ticket is None:
-                    logging.error(f"Chybí 'ticket' pro otevírací signál typu {signal_type} (ID v DB: {db_signal_id}).")
-                    return jsonify({"status": "error", "message": f"Missing 'ticket' for opening signal type {signal_type}"}), 400
-                c.execute("UPDATE signals SET ticket = ?, status = 'open' WHERE id = ?", (ticket, db_signal_id))
-                log_msg = f"Signál ID: {db_signal_id} (Typ: {signal_type}) úspěšně otevřen s ticketem: {ticket}."
+                    logging.error(f"{log_msg} Chyba: 'ticket' chybí při hlášení uzavření obchodu.")
+                    return jsonify({"status": "error", "message": "Missing 'ticket' when reporting trade closure"}), 400
 
-            elif signal_type == SIGNAL_TYPE_UPDATE_T2:
+                c.execute("UPDATE signals SET status = 'closed', ticket = ? WHERE id = ?", (ticket, db_signal_id))
+                log_msg += f" Obchod označen jako 'closed' v DB. Ziskový: {closed_in_profit}."
+
+                # Check if this closed ticket was a trigger for any functions
+                # We use the reported ticket directly as activation_target_ticket
+                if closed_in_profit: # Only activate BE/TS if TP1 (trigger) was profitable
+                    c.execute("""UPDATE trade_functions
+                                 SET is_active = 'TRUE', status_message = 'Activated: Trigger ticket closed profitably.'
+                                 WHERE activation_target_ticket = ? AND activation_condition_type = 'ON_CLOSE_TICKET' AND is_active = 'FALSE'""",
+                              (ticket,))
+                    if c.rowcount > 0:
+                        log_msg += f" {c.rowcount} funkcí (BE/TS) aktivováno pro cílový ticket {ticket}."
+                else:
+                    log_msg += f" Trigger ticket {ticket} uzavřen bez zisku, BE/TS funkce nebyly aktivovány."
+
+                conn.commit()
+                logging.info(log_msg)
+                return jsonify({"status": "ok", "message": "Trade closure reported and functions updated."})
+
+            # --- Trade Opening/Ticket Update Logic (existing logic modified) ---
+            if current_signal_status != 'new':
+                # Allow updating T1's ticket in 'signals' table if it was NULL, even if status isn't 'new' (e.g. EA retry)
+                # And also update the corresponding trade_functions' activation_target_ticket
+                if signal_type == SIGNAL_TYPE_INITIAL_T1 and ticket is not None and signal_row['ticket'] is None:
+                    c.execute("UPDATE signals SET ticket = ? WHERE id = ?", (ticket, db_signal_id))
+                    # Update trade_functions for the TP2 of this group
+                    if signal_group_id:
+                        c.execute("""UPDATE trade_functions
+                                     SET activation_target_ticket = ?
+                                     WHERE signal_db_id IN (SELECT id FROM signals WHERE signal_group_id = ? AND trade_label = 'T2_AUTO')
+                                       AND activation_condition_type = 'ON_CLOSE_TICKET'""",
+                                  (ticket, signal_group_id))
+                        log_msg += f" Ticket T1 (DB ID {db_signal_id}) aktualizován na {ticket}. {c.rowcount} trade_functions aktualizováno s activation_target_ticket."
+                    conn.commit()
+                    logging.info(log_msg)
+                    return jsonify({"status": "ok", "message": f"Ticket for T1 signal ID {db_signal_id} updated and linked."}), 200
+
+                logging.warning(f"{log_msg} Signál již zpracován (status: {current_signal_status}) a nejedná se o update T1 ticketu. Požadavek ignorován.")
+                return jsonify({"status": "ok", "message": f"Signal ID {db_signal_id} already processed (status: {current_signal_status})."}), 200
+
+            # Standard processing for 'new' signals
+            if signal_type in [SIGNAL_TYPE_INITIAL_T1, SIGNAL_TYPE_INITIAL_T2_DEFAULT, SIGNAL_TYPE_RE_ENTRY, SIGNAL_TYPE_STANDARD]:
+                if ticket is None:
+                    logging.error(f"{log_msg} Chyba: 'ticket' chybí pro otevírací signál typu {signal_type}.")
+                    return jsonify({"status": "error", "message": f"Missing 'ticket' for opening signal type {signal_type}"}), 400
+
+                c.execute("UPDATE signals SET ticket = ?, status = 'open' WHERE id = ?", (ticket, db_signal_id))
+                log_msg += f" Signál označen jako 'open' s ticketem {ticket}."
+
+                if signal_type == SIGNAL_TYPE_INITIAL_T1 and signal_group_id:
+                    # Link this T1 ticket to functions defined for its corresponding T2
+                    c.execute("""UPDATE trade_functions
+                                 SET activation_target_ticket = ?
+                                 WHERE signal_db_id IN (SELECT id FROM signals WHERE signal_group_id = ? AND trade_label = 'T2_AUTO')
+                                   AND activation_condition_type = 'ON_CLOSE_TICKET'""",
+                              (ticket, signal_group_id))
+                    if c.rowcount > 0:
+                        log_msg += f" {c.rowcount} trade_functions (pro T2 ze skupiny {signal_group_id}) aktualizováno s T1 ticketem {ticket} jako trigger."
+
+                elif signal_type == SIGNAL_TYPE_INITIAL_T2_DEFAULT:
+                    # Link this T2 ticket to its own function definitions
+                    c.execute("UPDATE trade_functions SET ticket_id = ? WHERE signal_db_id = ?", (ticket, db_signal_id))
+                    if c.rowcount > 0:
+                        log_msg += f" {c.rowcount} trade_functions (pro tento T2 signál) aktualizováno s vlastním ticketem {ticket}."
+
+            elif signal_type == SIGNAL_TYPE_UPDATE_T2: # This is for TP updates, not primary BE/TS logic
                 db_ticket = signal_row['ticket']
                 if ticket is not None:
                     if db_ticket is not None and db_ticket != ticket:
@@ -1410,6 +1823,58 @@ def run_flask():
         flask_app.run(host='0.0.0.0', port=5000, use_reloader=False, threaded=True)
     except Exception as e:
         logging.error(f"Nepodařilo se spustit Flask server: {e}")
+
+@flask_app.route('/active_trade_functions', methods=['GET'])
+def get_active_trade_functions():
+    ticket_id_str = request.args.get('ticket_id')
+    logging.info(f"Příchozí požadavek na /active_trade_functions pro ticket_id: {ticket_id_str}")
+
+    if not ticket_id_str:
+        return jsonify({"status": "error", "message": "Missing 'ticket_id' query parameter"}), 400
+    try:
+        ticket_id = int(ticket_id_str)
+    except ValueError:
+        return jsonify({"status": "error", "message": "Invalid 'ticket_id' format, must be an integer"}), 400
+
+    functions_to_send = []
+    try:
+        with db_lock, sqlite3.connect(DB_NAME) as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            # Fetch functions that are active and match the ticket_id
+            c.execute("""
+                SELECT function_type, ts_type, params_json, tp_target_price
+                FROM trade_functions
+                WHERE ticket_id = ? AND is_active = 'TRUE'
+            """, (ticket_id,))
+
+            for row in c.fetchall():
+                func_data = dict(row)
+                # Parse params_json back to dict for cleaner API response, though EA might handle string too
+                if func_data['params_json']:
+                    try:
+                        func_data['params'] = json.loads(func_data['params_json'])
+                        del func_data['params_json'] # Remove original string if parsed
+                    except json.JSONDecodeError:
+                        logging.warning(f"Could not parse params_json for ticket {ticket_id}, function {func_data['function_type']}: {func_data['params_json']}")
+                        # Keep params_json as string if parsing fails, EA will have to handle
+                else: # Ensure 'params' key exists even if null
+                    func_data['params'] = None
+                    if 'params_json' in func_data: del func_data['params_json']
+
+
+                functions_to_send.append(func_data)
+
+        logging.info(f"Nalezeno {len(functions_to_send)} aktivních funkcí pro ticket {ticket_id}.")
+        return jsonify(functions_to_send)
+
+    except sqlite3.Error as e:
+        logging.error(f"Chyba databáze při /active_trade_functions pro ticket {ticket_id}: {e}")
+        return jsonify({"status": "error", "message": "Database error"}), 500
+    except Exception as e:
+        logging.error(f"Obecná chyba při /active_trade_functions pro ticket {ticket_id}: {e}")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
+
 
 if __name__ == "__main__":
     init_db()
