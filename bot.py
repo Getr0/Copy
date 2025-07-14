@@ -78,32 +78,9 @@ def init_db():
             else:
                 logging.info("Tabulka 'signals' existuje s očekávanou strukturou, kontroluji a přidávám BE/TS sloupce pokud chybí.");_check_and_add_column(c, 'signals', 'status', 'TEXT');_check_and_add_column(c, 'signals', 'ticket', 'INTEGER');_check_and_add_column(c, 'signals', 'signal_group_id', 'TEXT');_check_and_add_column(c, 'signals', 'trade_label', 'TEXT');_check_and_add_column(c, 'signals', 'signal_type', 'TEXT');_check_and_add_column(c, 'signals', 'sl_value', 'REAL');_check_and_add_column(c, 'signals', 'tp_value', 'REAL');_check_and_add_column(c, 'signals', 'sl_value_type', 'TEXT');_check_and_add_column(c, 'signals', 'tp_value_type', 'TEXT');_check_and_add_column(c, 'signals', 'tp2_value', 'REAL');_check_and_add_column(c, 'signals', 'tp2_value_type', 'TEXT');_check_and_add_column(c, 'signals', 'be_active', "TEXT DEFAULT 'FALSE'");_check_and_add_column(c, 'signals', 'ts_active', "TEXT DEFAULT 'FALSE'");_check_and_add_column(c, 'signals', 'be_trigger_condition_type', 'TEXT');_check_and_add_column(c, 'signals', 'be_trigger_target_ticket', 'INTEGER');_check_and_add_column(c, 'signals', 'ts_trigger_condition_type', 'TEXT');_check_and_add_column(c, 'signals', 'ts_trigger_target_ticket', 'INTEGER');_check_and_add_column(c, 'signals', 'ts_start_pips', 'REAL');_check_and_add_column(c, 'signals', 'ts_step_pips', 'REAL');_check_and_add_column(c, 'signals', 'ts_distance_pips', 'REAL');_check_and_add_column(c, 'signals', 'is_tp1_for_be_ts', "TEXT DEFAULT 'FALSE'")
         c.execute("DELETE FROM signals WHERE status = 'new' OR status IS NULL");conn.commit()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS trade_functions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                signal_db_id INTEGER,
-                ticket_id INTEGER,
-                function_type TEXT NOT NULL CHECK(function_type IN ('BE', 'TS')),
-                ts_type TEXT CHECK(ts_type IN ('CLASSIC', 'CONVERGENT')),
-                activation_condition_type TEXT NOT NULL CHECK(activation_condition_type IN ('ON_CLOSE_TICKET', 'MANUAL', 'IMMEDIATE')),
-                activation_target_ticket INTEGER,
-                is_active TEXT NOT NULL DEFAULT 'FALSE' CHECK(is_active IN ('TRUE', 'FALSE')),
-                params_json TEXT,
-                tp_target_price REAL,
-                status_message TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (signal_db_id) REFERENCES signals (id) ON DELETE CASCADE
-            )
-        ''');logging.info("Tabulka 'trade_functions' zkontrolována/vytvořena.")
-        c.execute('''
-            CREATE TRIGGER IF NOT EXISTS update_trade_functions_updated_at
-            AFTER UPDATE ON trade_functions
-            FOR EACH ROW
-            BEGIN
-                UPDATE trade_functions SET updated_at = CURRENT_TIMESTAMP WHERE id = OLD.id;
-            END;
-        ''');logging.info("Trigger 'update_trade_functions_updated_at' zkontrolován/vytvořen.");conn.commit()
+        _check_and_add_column(c, 'signals', 'functions_active', "TEXT DEFAULT 'FALSE'")
+        logging.info("Sloupec 'functions_active' zkontrolován/přidán do tabulky 'signals'.")
+        conn.commit()
 class SessionManager:
     def __init__(self, base_dir=SESSIONS_DIR):
         self.sessions_dir = base_dir;os.makedirs(self.sessions_dir, exist_ok=True)
@@ -448,56 +425,35 @@ class TelegramBotApp(ctk.CTk):
                     # Trade 2 (TP2)
                     t2_config = config.get('trade_2', {})
                     func_config = config.get('functions', {})
+                    # Trade 2 (TP2) - now with all params
+                    t2_config = config.get('trade_2', {})
+                    func_config = config.get('functions', {})
+                    ts_type = func_config.get('ts_type', 'Classic')
+                    ts_params_config = func_config.get(f"{ts_type.lower()}_ts", {})
+
+                    ts_start_pips, ts_step_pips, ts_distance_pips = None, None, None
+                    if ts_type == "Classic":
+                        ts_start_pips = ts_params_config.get('start_pips')
+                        ts_step_pips = ts_params_config.get('step_pips')
+                        ts_distance_pips = ts_params_config.get('distance_pips')
+
                     t2_signal_db_id = self._save_signal_data(
                         symbol=symbol, action=action, entry_price=entry_price_ref,
                         signal_group_id=signal_group_id, trade_label="T2_AUTO",
-                        signal_type=SIGNAL_TYPE_INITIAL_T2_DEFAULT, sl_pips=t1_config.get('sl_pips'), # Same SL as T1
+                        signal_type=SIGNAL_TYPE_INITIAL_T2_DEFAULT,
+                        sl_pips=t1_config.get('sl_pips'),  # Same SL as T1
                         tp_pips=t2_config.get('default_tp_pips'),
                         be_active=func_config.get('be_active', False),
-                        ts_active=func_config.get('ts_active', False)
+                        ts_active=func_config.get('ts_active', False),
+                        ts_start_pips=ts_start_pips,
+                        ts_step_pips=ts_step_pips,
+                        ts_distance_pips=ts_distance_pips,
+                        # Set trigger condition directly in the signal
+                        be_trigger_condition_type='ON_CLOSE_TICKET',
+                        ts_trigger_condition_type='ON_CLOSE_TICKET'
                     )
-
-                    if t2_signal_db_id:
-                        if func_config.get('be_active'):
-                            be_params = {"offset_pips": 1.0}
-                            self._save_trade_function_definition(
-                                signal_db_id=t2_signal_db_id, function_type="BE",
-                                activation_condition_type="ON_CLOSE_TICKET", params=be_params
-                            )
-                        if func_config.get('ts_active'):
-                            ts_type = func_config.get('ts_type', 'Classic')
-                            ts_params_config = func_config.get(f"{ts_type.lower()}_ts", {})
-                            ts_params = {}
-                            if ts_type == "Classic":
-                                ts_params = {
-                                    "trail_start_pips": ts_params_config.get('start_pips'),
-                                    "trail_step_pips": ts_params_config.get('step_pips'),
-                                    "trail_distance_pips": ts_params_config.get('distance_pips')
-                                }
-                            elif ts_type == "Convergent":
-                                ts_params = {
-                                    "activation_start_pips": ts_params_config.get('activation_start_pips'),
-                                    "converge_factor": ts_params_config.get('converge_factor'),
-                                    "min_stop_distance_pips": ts_params_config.get('min_stop_distance_pips')
-                                }
-
-                            # Calculate target price for Convergent TS
-                            tp2_target_price = None
-                            if ts_type == "Convergent":
-                                default_tp_pips = t2_config.get('default_tp_pips')
-                                pip_size = PIP_SIZE_XAUUSD if symbol == "XAUUSD" else 0.0001
-                                if action == "BUY":
-                                    tp2_target_price = entry_price_ref + (default_tp_pips * pip_size)
-                                elif action == "SELL":
-                                    tp2_target_price = entry_price_ref - (default_tp_pips * pip_size)
-
-                            self._save_trade_function_definition(
-                                signal_db_id=t2_signal_db_id, function_type="TS",
-                                ts_type=ts_type, activation_condition_type="ON_CLOSE_TICKET",
-                                params=ts_params, tp_target_price=tp2_target_price
-                            )
-                    else:
-                        self._update_log(f"Chyba: T2 signál pro GroupID {signal_group_id} nebyl úspěšně uložen, BE/TS funkce nebyly vytvořeny.", "ERROR")
+                    if not t2_signal_db_id:
+                        self._update_log(f"Chyba: T2 signál pro GroupID {signal_group_id} nebyl úspěšně uložen.", "ERROR")
 
             elif current_signal_type_from_parser == 'UPDATE_SLTP':
                 active_symbol = channel_context.get('last_initial_symbol');active_action = channel_context.get('last_initial_action');active_group_id = channel_context.get('last_signal_group_id')
@@ -559,14 +515,27 @@ class TelegramBotApp(ctk.CTk):
                     logging.error(f"Nepodařilo se aktualizovat řádek v DB pro Group ID: {signal_group_id}, Label: {trade_label}, ačkoliv byl nalezen.");return False
             except sqlite3.Error as e:
                 logging.error(f"Chyba DB při aktualizaci TP obchodu (Group: {signal_group_id}, Label: {trade_label}): {e}");return False
-    def _save_signal_data(self, symbol: str, action: str, signal_type: str,signal_group_id: str | None = None,trade_label: str | None = None,entry_price: float = 0,sl_price: float | None = None, tp_price: float | None = None,sl_pips: float | None = None, tp_pips: float | None = None,tp2_price_optional: float | None = None,be_active: bool = False,ts_active: bool = False,be_trigger_condition_type: str | None = None,be_trigger_target_ticket: int | None = None,ts_trigger_condition_type: str | None = None,ts_trigger_target_ticket: int | None = None,ts_start_pips: float | None = None,ts_step_pips: float | None = None,ts_distance_pips: float | None = None,is_tp1_for_be_ts: bool = False):
+    def _save_signal_data(self, symbol: str, action: str, signal_type: str,
+                          signal_group_id: str | None = None, trade_label: str | None = None,
+                          entry_price: float = 0, sl_price: float | None = None,
+                          tp_price: float | None = None, sl_pips: float | None = None,
+                          tp_pips: float | None = None, tp2_price_optional: float | None = None,
+                          be_active: bool = False, ts_active: bool = False,
+                          be_trigger_condition_type: str | None = None, be_trigger_target_ticket: int | None = None,
+                          ts_trigger_condition_type: str | None = None, ts_trigger_target_ticket: int | None = None,
+                          ts_start_pips: float | None = None, ts_step_pips: float | None = None,
+                          ts_distance_pips: float | None = None, is_tp1_for_be_ts: bool = False):
         sl_val, sl_val_type, tp_val, tp_val_type, tp2_val = None, None, None, None, None
         if sl_pips is not None: sl_val, sl_val_type = sl_pips, "PIPS"
         elif sl_price is not None: sl_val, sl_val_type = sl_price, "PRICE"
         if tp_pips is not None: tp_val, tp_val_type = tp_pips, "PIPS"
         elif tp_price is not None: tp_val, tp_val_type = tp_price, "PRICE"
         if tp2_price_optional is not None: tp2_val = tp2_price_optional
-        be_active_str = "TRUE" if be_active else "FALSE";ts_active_str = "TRUE" if ts_active else "FALSE";is_tp1_for_be_ts_str = "TRUE" if is_tp1_for_be_ts else "FALSE"
+
+        be_active_str = "TRUE" if be_active else "FALSE"
+        ts_active_str = "TRUE" if ts_active else "FALSE"
+        is_tp1_for_be_ts_str = "TRUE" if is_tp1_for_be_ts else "FALSE"
+
         with db_lock, sqlite3.connect(DB_NAME) as conn:
             c = conn.cursor()
             try:
@@ -579,9 +548,24 @@ class TelegramBotApp(ctk.CTk):
                               ts_trigger_condition_type, ts_trigger_target_ticket,
                               ts_start_pips, ts_step_pips, ts_distance_pips, is_tp1_for_be_ts)
                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
-                params = (symbol, action, entry_price, datetime.datetime.now(), 'new',signal_group_id, trade_label, signal_type,sl_val, tp_val, sl_val_type, tp_val_type,tp2_val, "PRICE" if tp2_val is not None else None,be_active_str, ts_active_str, be_trigger_condition_type, be_trigger_target_ticket,ts_trigger_condition_type, ts_trigger_target_ticket,ts_start_pips, ts_step_pips, ts_distance_pips, is_tp1_for_be_ts_str);c.execute(sql, params);conn.commit();last_id = c.lastrowid;self._update_log(f"Signál uložen do DB (ID: {last_id}): {signal_type} - {symbol} {action} (Label: {trade_label}, Group: {signal_group_id}, BE:{be_active_str}, TS:{ts_active_str})", "INFO");return last_id
+                params = (
+                    symbol, action, entry_price, datetime.datetime.now(), 'new',
+                    signal_group_id, trade_label, signal_type,
+                    sl_val, tp_val, sl_val_type, tp_val_type,
+                    tp2_val, "PRICE" if tp2_val is not None else None,
+                    be_active_str, ts_active_str, be_trigger_condition_type, be_trigger_target_ticket,
+                    ts_trigger_condition_type, ts_trigger_target_ticket,
+                    ts_start_pips, ts_step_pips, ts_distance_pips, is_tp1_for_be_ts_str
+                )
+                c.execute(sql, params)
+                conn.commit()
+                last_id = c.lastrowid
+                self._update_log(f"Signál uložen do DB (ID: {last_id}): {signal_type} - {symbol} {action} (Label: {trade_label}, Group: {signal_group_id}, BE:{be_active_str}, TS:{ts_active_str})", "INFO")
+                return last_id
             except sqlite3.Error as e:
-                log_data = {"symbol": symbol, "action": action, "entry_price": entry_price,"signal_group_id": signal_group_id, "trade_label": trade_label,"signal_type": signal_type, "sl_val": sl_val, "tp_val": tp_val,"sl_val_type": sl_val_type, "tp_val_type": tp_val_type, "tp2_val": tp2_val,"tp2_value_type_for_db": "PRICE" if tp2_val is not None else None,"be_active": be_active_str, "ts_active": ts_active_str,"be_trigger_condition_type": be_trigger_condition_type, "be_trigger_target_ticket": be_trigger_target_ticket,"ts_trigger_condition_type": ts_trigger_condition_type, "ts_trigger_target_ticket": ts_trigger_target_ticket,"ts_start_pips": ts_start_pips, "ts_step_pips": ts_step_pips, "ts_distance_pips": ts_distance_pips,"is_tp1_for_be_ts": is_tp1_for_be_ts_str};logging.error(f"Chyba při ukládání signálu do DB: {e}. Data: {log_data}");self._update_log(f"Chyba DB při ukládání signálu {symbol} {action}", "ERROR")
+                logging.error(f"Chyba při ukládání signálu do DB: {e}.")
+                self._update_log(f"Chyba DB při ukládání signálu {symbol} {action}", "ERROR")
+
     def _show_phone_selector(self):
         selector_window = ctk.CTkToplevel(self);selector_window.title("Správa telefonních čísel");selector_window.geometry("450x420");selector_window.transient(self);selector_window.grab_set();selector_window.resizable(False, False);selector_window.configure(fg_color=self.BG_COLOR);phone_numbers = self.session_manager.get_saved_phone_numbers();selected_phone_var = tk.StringVar(value=self.phone_entry_var.get());saved_frame = ctk.CTkFrame(selector_window, fg_color=self.FRAME_COLOR, corner_radius=8);saved_frame.pack(fill='x', padx=15, pady=(15,10));ctk.CTkLabel(saved_frame, text="Uložená čísla", font=self.FONT_BOLD).pack(anchor="w", padx=10, pady=(8,4));listbox_frame = ctk.CTkFrame(saved_frame, fg_color=self.ENTRY_BG_COLOR, corner_radius=6);listbox_frame.pack(fill="x", expand=True, padx=10, pady=(0,10));phone_listbox = tk.Listbox(listbox_frame, height=5, bg=self.ENTRY_BG_COLOR, fg=self.TEXT_COLOR,borderwidth=0, highlightthickness=0, selectbackground=self.ACCENT_COLOR,font=self.FONT_NORMAL, relief='flat', exportselection=False,selectforeground=self.TEXT_COLOR)
         for phone in phone_numbers: phone_listbox.insert(tk.END, phone)
@@ -667,31 +651,6 @@ class TelegramBotApp(ctk.CTk):
         if self.client_loop and self.client_loop.is_closed():
             self._update_log(f"Asyncio smyčka ({id(self.client_loop)}) byla uzavřena (kontrola v shutdown).", "DEBUG")
         self.client_loop = None;self._update_log("Telegram klient a jeho vlákno byly ukončeny.", "INFO");self.after(0, lambda: [widget.destroy() for widget in self.channels_list_frame.winfo_children()])
-    def _save_trade_function_definition(self, signal_db_id: int, function_type: str, activation_condition_type: str, params: dict, ts_type: str | None = None, tp_target_price: float | None = None, activation_target_ticket: int | None = None):
-        params_json_str = json.dumps(params) if params else None
-        is_active_str = "FALSE"
-        ticket_id = None # Initially null, updated when the trade is opened
-
-        with db_lock, sqlite3.connect(DB_NAME) as conn:
-            c = conn.cursor()
-            try:
-                c.execute("""
-                    INSERT INTO trade_functions
-                        (signal_db_id, ticket_id, function_type, ts_type,
-                         activation_condition_type, activation_target_ticket,
-                         is_active, params_json, tp_target_price, status_message)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (signal_db_id, ticket_id, function_type, ts_type,
-                      activation_condition_type, activation_target_ticket,
-                      is_active_str, params_json_str, tp_target_price,
-                      f"Pending: {activation_condition_type} on ticket {activation_target_ticket if activation_target_ticket else 'N/A'}"))
-                conn.commit()
-                self._update_log(f"DB: Saved {function_type}{f' ({ts_type})' if ts_type else ''} function for signal_db_id {signal_db_id}. Condition: {activation_condition_type}", "INFO")
-                return c.lastrowid
-            except sqlite3.Error as e:
-                self._update_log(f"DB Error: Failed to save function {function_type} for signal_db_id {signal_db_id}: {e}", "ERROR")
-                return None
-
     def _show_functions_dialog(self):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Výchozí Nastavení Funkcí Obchodů")
@@ -837,7 +796,11 @@ def report_trade():
         data = request.get_json(silent=True)
         if data is None:
             logging.error(f"Chybný Content-Type nebo nevalidní JSON v /report_trade. Raw data: {request.data}");return jsonify({"status": "error", "message": "Invalid JSON or Content-Type"}), 400
-        logging.info(f"Přijatá data pro report: {data}");db_signal_id = data.get('id');ticket = data.get('ticket')
+
+        logging.info(f"Přijatá data pro report: {data}")
+        db_signal_id = data.get('id')
+        ticket = data.get('ticket')
+
         if db_signal_id is None:
             logging.error("Chybí 'id' (databázové ID signálu) v přijatých datech pro /report_trade.");return jsonify({"status": "error", "message": "Missing 'id' (signal database ID)"}), 400
         try:
@@ -846,53 +809,66 @@ def report_trade():
                 ticket = int(ticket)
         except ValueError:
             logging.error(f"Neplatný typ pro 'id' nebo 'ticket': id={data.get('id')}, ticket={data.get('ticket')}");return jsonify({"status": "error", "message": "Invalid type for 'id' or 'ticket'"}), 400
+
         with db_lock, sqlite3.connect(DB_NAME) as conn:
-            conn.row_factory = sqlite3.Row;c = conn.cursor();c.execute("SELECT id, signal_type, status, ticket FROM signals WHERE id = ?", (db_signal_id,));signal_row = c.fetchone()
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+
+            c.execute("SELECT * FROM signals WHERE id = ?", (db_signal_id,))
+            signal_row = c.fetchone()
+
             if not signal_row:
                 logging.warning(f"/report_trade: Signál ID {db_signal_id} nenalezen.");return jsonify({"status": "error", "message": f"Signal with ID {db_signal_id} not found"}), 404
-            current_signal_status = signal_row['status'];signal_type = signal_row['signal_type'];signal_group_id = signal_row['signal_group_id'];signal_trade_label = signal_row['trade_label'];is_tp1_for_be_ts_val = signal_row['is_tp1_for_be_ts'] == 'TRUE';log_msg = f"/report_trade: ID:{db_signal_id}, Ticket:{ticket}, Type:{signal_type}, Label:{signal_trade_label}, Group:{signal_group_id}.";closed_in_profit = data.get('closed_in_profit')
-            if closed_in_profit is not None:
+
+            log_msg_base = f"/report_trade: ID:{db_signal_id}, Ticket:{ticket}, Type:{signal_row['signal_type']}, Label:{signal_row['trade_label']}, Group:{signal_row['signal_group_id']}."
+
+            # --- Trade Closure Reporting ---
+            if 'closed_in_profit' in data:
+                closed_in_profit = data['closed_in_profit']
                 if ticket is None:
-                    logging.error(f"{log_msg} Chyba: 'ticket' chybí při hlášení uzavření obchodu.");return jsonify({"status": "error", "message": "Missing 'ticket' when reporting trade closure"}), 400
-                c.execute("UPDATE signals SET status = 'closed', ticket = ? WHERE id = ?", (ticket, db_signal_id));log_msg += f" Obchod označen jako 'closed' v DB. Ziskový: {closed_in_profit}."
-                if closed_in_profit:
-                    c.execute("""UPDATE trade_functions
-                                 SET is_active = 'TRUE', status_message = 'Activated: Trigger ticket closed profitably.'
-                                 WHERE activation_target_ticket = ? AND activation_condition_type = 'ON_CLOSE_TICKET' AND is_active = 'FALSE'""",
-                              (ticket,))
+                    logging.error(f"{log_msg_base} Chyba: 'ticket' chybí při hlášení uzavření obchodu.");return jsonify({"status": "error", "message": "Missing 'ticket' when reporting trade closure"}), 400
+
+                c.execute("UPDATE signals SET status = 'closed' WHERE id = ?", (db_signal_id,))
+                log_msg = f"{log_msg_base} Obchod označen jako 'closed'. Ziskový: {closed_in_profit}."
+
+                # If a profitable T1 trade is closed, activate functions on the corresponding T2 trade
+                if closed_in_profit and signal_row['trade_label'] == 'T1_AUTO' and signal_row['signal_group_id']:
+                    c.execute("""
+                        UPDATE signals
+                        SET functions_active = 'TRUE'
+                        WHERE signal_group_id = ? AND trade_label = 'T2_AUTO' AND status = 'open'
+                    """, (signal_row['signal_group_id'],))
                     if c.rowcount > 0:
-                        log_msg += f" {c.rowcount} funkcí (BE/TS) aktivováno pro cílový ticket {ticket}."
-                else:
-                    log_msg += f" Trigger ticket {ticket} uzavřen bez zisku, BE/TS funkce nebyly aktivovány."
-                conn.commit();logging.info(log_msg);return jsonify({"status": "ok", "message": "Trade closure reported and functions updated."})
-            if current_signal_status != 'new':
-                if signal_type == SIGNAL_TYPE_INITIAL_T1 and ticket is not None and signal_row['ticket'] is None:
-                    c.execute("UPDATE signals SET ticket = ? WHERE id = ?", (ticket, db_signal_id))
-                    if signal_group_id:
-                        c.execute("""UPDATE trade_functions
-                                     SET activation_target_ticket = ?
-                                     WHERE signal_db_id IN (SELECT id FROM signals WHERE signal_group_id = ? AND trade_label = 'T2_AUTO')
-                                       AND activation_condition_type = 'ON_CLOSE_TICKET'""",
-                                  (ticket, signal_group_id));log_msg += f" Ticket T1 (DB ID {db_signal_id}) aktualizován na {ticket}. {c.rowcount} trade_functions aktualizováno s activation_target_ticket."
-                    conn.commit();logging.info(log_msg);return jsonify({"status": "ok", "message": f"Ticket for T1 signal ID {db_signal_id} updated and linked."}), 200
-                logging.warning(f"{log_msg} Signál již zpracován (status: {current_signal_status}) a nejedná se o update T1 ticketu. Požadavek ignorován.");return jsonify({"status": "ok", "message": f"Signal ID {db_signal_id} already processed (status: {current_signal_status})."}), 200
-            if signal_type in [SIGNAL_TYPE_INITIAL_T1, SIGNAL_TYPE_INITIAL_T2_DEFAULT, SIGNAL_TYPE_RE_ENTRY, SIGNAL_TYPE_STANDARD]:
-                if ticket is None:
-                    logging.error(f"{log_msg} Chyba: 'ticket' chybí pro otevírací signál typu {signal_type}.");return jsonify({"status": "error", "message": f"Missing 'ticket' for opening signal type {signal_type}"}), 400
-                c.execute("UPDATE signals SET ticket = ?, status = 'open' WHERE id = ?", (ticket, db_signal_id));log_msg += f" Signál označen jako 'open' s ticketem {ticket}."
-                if signal_type == SIGNAL_TYPE_INITIAL_T1 and signal_group_id:
-                    c.execute("""UPDATE trade_functions
-                                 SET activation_target_ticket = ?
-                                 WHERE signal_db_id IN (SELECT id FROM signals WHERE signal_group_id = ? AND trade_label = 'T2_AUTO')
-                                   AND activation_condition_type = 'ON_CLOSE_TICKET'""",
-                              (ticket, signal_group_id))
+                        log_msg += f" Funkce (BE/TS) aktivovány pro T2 obchod ve skupině {signal_row['signal_group_id']}."
+                    else:
+                        log_msg += f" Nebyl nalezen žádný otevřený T2 obchod pro aktivaci funkcí ve skupině {signal_row['signal_group_id']}."
+
+                conn.commit()
+                logging.info(log_msg)
+                return jsonify({"status": "ok", "message": "Trade closure reported."})
+
+            # --- New Trade Opening Reporting ---
+            if signal_row['status'] != 'new':
+                logging.warning(f"{log_msg_base} Signál již zpracován (status: {signal_row['status']}). Požadavek ignorován.");return jsonify({"status": "ok", "message": f"Signal ID {db_signal_id} already processed (status: {signal_row['status']})."}), 200
+
+            if ticket is None:
+                logging.error(f"{log_msg_base} Chyba: 'ticket' chybí pro otevírací signál.");return jsonify({"status": "error", "message": "Missing 'ticket' for opening signal"}), 400
+
+            if signal_row['signal_type'] in [SIGNAL_TYPE_INITIAL_T1, SIGNAL_TYPE_INITIAL_T2_DEFAULT, SIGNAL_TYPE_RE_ENTRY, SIGNAL_TYPE_STANDARD]:
+                c.execute("UPDATE signals SET ticket = ?, status = 'open' WHERE id = ?", (ticket, db_signal_id))
+                log_msg = f"{log_msg_base} Signál označen jako 'open' s ticketem {ticket}."
+
+                # If T1 is opened, set its ticket as the trigger for T2
+                if signal_row['trade_label'] == 'T1_AUTO' and signal_row['signal_group_id']:
+                    c.execute("""
+                        UPDATE signals
+                        SET be_trigger_target_ticket = ?, ts_trigger_target_ticket = ?
+                        WHERE signal_group_id = ? AND trade_label = 'T2_AUTO'
+                    """, (ticket, ticket, signal_row['signal_group_id']))
                     if c.rowcount > 0:
-                        log_msg += f" {c.rowcount} trade_functions (pro T2 ze skupiny {signal_group_id}) aktualizováno s T1 ticketem {ticket} jako trigger."
-                elif signal_type == SIGNAL_TYPE_INITIAL_T2_DEFAULT:
-                    c.execute("UPDATE trade_functions SET ticket_id = ? WHERE signal_db_id = ?", (ticket, db_signal_id))
-                    if c.rowcount > 0:
-                        log_msg += f" {c.rowcount} trade_functions (pro tento T2 signál) aktualizováno s vlastním ticketem {ticket}."
-            elif signal_type == SIGNAL_TYPE_UPDATE_T2:
+                        log_msg += f" T2 obchod ve skupině {signal_row['signal_group_id']} byl aktualizován s T1 ticketem {ticket} jako triggerem."
+
+            elif signal_row['signal_type'] == SIGNAL_TYPE_UPDATE_T2:
                 db_ticket = signal_row['ticket']
                 if ticket is not None:
                     if db_ticket is not None and db_ticket != ticket:
