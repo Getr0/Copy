@@ -4,82 +4,64 @@ def _check_and_add_column(cursor, table_name, column_name, column_type):
     if column_name not in columns:
         logging.info(f"Aktualizuji databázi: Přidávám sloupec '{column_name}' do tabulky '{table_name}'.");cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 def init_db():
+    # This function now ensures both tables are created correctly.
+    # It's designed to be safe to run multiple times.
     with db_lock, sqlite3.connect(DB_NAME) as conn:
-        c = conn.cursor();c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='signals'")
-        if not c.fetchone():
-            c.execute('''CREATE TABLE signals (
-                           id INTEGER PRIMARY KEY AUTOINCREMENT,
-                           symbol TEXT,
-                           action TEXT,
-                           entry_price REAL,
-                           sl REAL,
-                           tp1 REAL,
-                           tp2 REAL,
-                           tp3 REAL,
-                           timestamp DATETIME,
-                           status TEXT,
-                           ticket INTEGER,
-                           signal_group_id TEXT,
-                           trade_label TEXT,
-                           signal_type TEXT,
-                           sl_value REAL,
-                           tp_value REAL,
-                           sl_value_type TEXT,
-                           tp_value_type TEXT,
-                           tp2_value REAL,
-                           tp2_value_type TEXT,
-                           be_active TEXT DEFAULT 'FALSE',
-                           ts_active TEXT DEFAULT 'FALSE',
-                           be_trigger_condition_type TEXT,
-                           be_trigger_target_ticket INTEGER,
-                           ts_trigger_condition_type TEXT,
-                           ts_trigger_target_ticket INTEGER,
-                           ts_start_pips REAL,
-                           ts_step_pips REAL,
-                           ts_distance_pips REAL,
-                           is_tp1_for_be_ts TEXT DEFAULT 'FALSE'
-                           )''');logging.info("Nová tabulka 'signals' vytvořena s novou strukturou (včetně BE/TS polí).")
-        else:
-            c.execute("PRAGMA table_info(signals)");columns = [row[1] for row in c.fetchall()]
-            if 'signal_type' not in columns or 'be_active' not in columns:
-                logging.warning("Detekována stará struktura tabulky 'signals' nebo chybí BE/TS pole. Přejmenovávám na 'signals_old' a vytvářím novou.")
-                try:
-                    c.execute("ALTER TABLE signals RENAME TO signals_old");logging.info("Stará tabulka 'signals' přejmenována na 'signals_old'.")
-                except sqlite3.OperationalError as e:
-                    logging.error(f"Nepodařilo se přejmenovat starou tabulku 'signals': {e}. Možná 'signals_old' již existuje.")
-                c.execute('''CREATE TABLE signals (
-                               id INTEGER PRIMARY KEY AUTOINCREMENT,
-                               symbol TEXT,
-                               action TEXT,
-                               entry_price REAL,
-                               timestamp DATETIME,
-                               status TEXT,
-                               ticket INTEGER,
-                               signal_group_id TEXT,
-                               trade_label TEXT,
-                               signal_type TEXT,
-                               sl_value REAL,
-                               tp_value REAL,
-                               sl_value_type TEXT,
-                               tp_value_type TEXT,
-                               tp2_value REAL,
-                               tp2_value_type TEXT,
-                               be_active TEXT DEFAULT 'FALSE',
-                               ts_active TEXT DEFAULT 'FALSE',
-                               be_trigger_condition_type TEXT,
-                               be_trigger_target_ticket INTEGER,
-                               ts_trigger_condition_type TEXT,
-                               ts_trigger_target_ticket INTEGER,
-                               ts_start_pips REAL,
-                               ts_step_pips REAL,
-                               ts_distance_pips REAL,
-                               is_tp1_for_be_ts TEXT DEFAULT 'FALSE'
-                               )''');logging.info("Nová tabulka 'signals' vytvořena po přejmenování staré (včetně BE/TS polí).")
-            else:
-                logging.info("Tabulka 'signals' existuje s očekávanou strukturou, kontroluji a přidávám BE/TS sloupce pokud chybí.");_check_and_add_column(c, 'signals', 'status', 'TEXT');_check_and_add_column(c, 'signals', 'ticket', 'INTEGER');_check_and_add_column(c, 'signals', 'signal_group_id', 'TEXT');_check_and_add_column(c, 'signals', 'trade_label', 'TEXT');_check_and_add_column(c, 'signals', 'signal_type', 'TEXT');_check_and_add_column(c, 'signals', 'sl_value', 'REAL');_check_and_add_column(c, 'signals', 'tp_value', 'REAL');_check_and_add_column(c, 'signals', 'sl_value_type', 'TEXT');_check_and_add_column(c, 'signals', 'tp_value_type', 'TEXT');_check_and_add_column(c, 'signals', 'tp2_value', 'REAL');_check_and_add_column(c, 'signals', 'tp2_value_type', 'TEXT');_check_and_add_column(c, 'signals', 'be_active', "TEXT DEFAULT 'FALSE'");_check_and_add_column(c, 'signals', 'ts_active', "TEXT DEFAULT 'FALSE'");_check_and_add_column(c, 'signals', 'be_trigger_condition_type', 'TEXT');_check_and_add_column(c, 'signals', 'be_trigger_target_ticket', 'INTEGER');_check_and_add_column(c, 'signals', 'ts_trigger_condition_type', 'TEXT');_check_and_add_column(c, 'signals', 'ts_trigger_target_ticket', 'INTEGER');_check_and_add_column(c, 'signals', 'ts_start_pips', 'REAL');_check_and_add_column(c, 'signals', 'ts_step_pips', 'REAL');_check_and_add_column(c, 'signals', 'ts_distance_pips', 'REAL');_check_and_add_column(c, 'signals', 'is_tp1_for_be_ts', "TEXT DEFAULT 'FALSE'")
-        c.execute("DELETE FROM signals WHERE status = 'new' OR status IS NULL");conn.commit()
-        _check_and_add_column(c, 'signals', 'functions_active', "TEXT DEFAULT 'FALSE'")
-        logging.info("Sloupec 'functions_active' zkontrolován/přidán do tabulky 'signals'.")
+        c = conn.cursor()
+
+        # --- Tabela Signals (Zjednodušená) ---
+        c.execute("PRAGMA foreign_keys=off;") # Required to modify table schema
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS signals_new (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               symbol TEXT NOT NULL,
+               action TEXT NOT NULL,
+               entry_price REAL,
+               timestamp DATETIME NOT NULL,
+               status TEXT NOT NULL,
+               ticket INTEGER,
+               signal_group_id TEXT,
+               trade_label TEXT,
+               signal_type TEXT,
+               sl_value REAL,
+               tp_value REAL,
+               sl_value_type TEXT,
+               tp_value_type TEXT
+            )
+        ''')
+
+        # Check if old 'signals' table exists and migrate data if necessary
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='signals'")
+        if c.fetchone():
+            # Copy data, ignoring columns that no longer exist
+            try:
+                c.execute("INSERT INTO signals_new (id, symbol, action, entry_price, timestamp, status, ticket, signal_group_id, trade_label, signal_type, sl_value, tp_value, sl_value_type, tp_value_type) SELECT id, symbol, action, entry_price, timestamp, status, ticket, signal_group_id, trade_label, signal_type, sl_value, tp_value, sl_value_type, tp_value_type FROM signals")
+                c.execute("DROP TABLE signals")
+                logging.info("Stará tabulka 'signals' migrována na novou strukturu.")
+            except sqlite3.OperationalError as e:
+                logging.warning(f"Nepodařilo se migrovat 'signals', možná už má novou strukturu. Chyba: {e}")
+
+        c.execute("ALTER TABLE signals_new RENAME TO signals")
+        c.execute("PRAGMA foreign_keys=on;")
+        logging.info("Tabulka 'signals' zkontrolována/vytvořena s novou zjednodušenou strukturou.")
+
+        # --- Nová Tabela Trade Actions ---
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS trade_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                trigger_event TEXT NOT NULL,
+                trigger_ticket INTEGER,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                params_json TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (signal_id) REFERENCES signals (id) ON DELETE CASCADE
+            )
+        ''')
+        logging.info("Tabulka 'trade_actions' zkontrolována/vytvořena.")
+
+        c.execute("DELETE FROM signals WHERE status = 'new' OR status IS NULL")
         conn.commit()
 class SessionManager:
     def __init__(self, base_dir=SESSIONS_DIR):
@@ -405,7 +387,7 @@ class TelegramBotApp(ctk.CTk):
                     self._update_log("Chyba: Chybí konfigurace pro SniperPro v parsing_config.json", "ERROR"); return
 
                 if current_signal_type_from_parser == SIGNAL_TYPE_INITIAL:
-                    symbol = parsed_data['symbol'];action = parsed_data['action'];entry_price_ref = parsed_data['entry_price_ref']
+                    symbol = parsed_data['symbol']; action = parsed_data['action']; entry_price_ref = parsed_data['entry_price_ref']
                     signal_group_id = f"{dialog_id}_{symbol}_{action}_{int(datetime.datetime.now().timestamp())}"
                     channel_context.update({
                         'last_initial_symbol': symbol, 'last_initial_action': action,
@@ -519,22 +501,12 @@ class TelegramBotApp(ctk.CTk):
                           signal_group_id: str | None = None, trade_label: str | None = None,
                           entry_price: float = 0, sl_price: float | None = None,
                           tp_price: float | None = None, sl_pips: float | None = None,
-                          tp_pips: float | None = None, tp2_price_optional: float | None = None,
-                          be_active: bool = False, ts_active: bool = False,
-                          be_trigger_condition_type: str | None = None, be_trigger_target_ticket: int | None = None,
-                          ts_trigger_condition_type: str | None = None, ts_trigger_target_ticket: int | None = None,
-                          ts_start_pips: float | None = None, ts_step_pips: float | None = None,
-                          ts_distance_pips: float | None = None, is_tp1_for_be_ts: bool = False):
-        sl_val, sl_val_type, tp_val, tp_val_type, tp2_val = None, None, None, None, None
+                          tp_pips: float | None = None):
+        sl_val, sl_val_type, tp_val, tp_val_type = None, None, None, None
         if sl_pips is not None: sl_val, sl_val_type = sl_pips, "PIPS"
         elif sl_price is not None: sl_val, sl_val_type = sl_price, "PRICE"
         if tp_pips is not None: tp_val, tp_val_type = tp_pips, "PIPS"
         elif tp_price is not None: tp_val, tp_val_type = tp_price, "PRICE"
-        if tp2_price_optional is not None: tp2_val = tp2_price_optional
-
-        be_active_str = "TRUE" if be_active else "FALSE"
-        ts_active_str = "TRUE" if ts_active else "FALSE"
-        is_tp1_for_be_ts_str = "TRUE" if is_tp1_for_be_ts else "FALSE"
 
         with db_lock, sqlite3.connect(DB_NAME) as conn:
             c = conn.cursor()
@@ -542,29 +514,39 @@ class TelegramBotApp(ctk.CTk):
                 sql = '''INSERT INTO signals
                              (symbol, action, entry_price, timestamp, status,
                               signal_group_id, trade_label, signal_type,
-                              sl_value, tp_value, sl_value_type, tp_value_type,
-                              tp2_value, tp2_value_type,
-                              be_active, ts_active, be_trigger_condition_type, be_trigger_target_ticket,
-                              ts_trigger_condition_type, ts_trigger_target_ticket,
-                              ts_start_pips, ts_step_pips, ts_distance_pips, is_tp1_for_be_ts)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
+                              sl_value, tp_value, sl_value_type, tp_value_type)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
                 params = (
                     symbol, action, entry_price, datetime.datetime.now(), 'new',
                     signal_group_id, trade_label, signal_type,
-                    sl_val, tp_val, sl_val_type, tp_val_type,
-                    tp2_val, "PRICE" if tp2_val is not None else None,
-                    be_active_str, ts_active_str, be_trigger_condition_type, be_trigger_target_ticket,
-                    ts_trigger_condition_type, ts_trigger_target_ticket,
-                    ts_start_pips, ts_step_pips, ts_distance_pips, is_tp1_for_be_ts_str
+                    sl_val, tp_val, sl_val_type, tp_val_type
                 )
                 c.execute(sql, params)
                 conn.commit()
                 last_id = c.lastrowid
-                self._update_log(f"Signál uložen do DB (ID: {last_id}): {signal_type} - {symbol} {action} (Label: {trade_label}, Group: {signal_group_id}, BE:{be_active_str}, TS:{ts_active_str})", "INFO")
+                self._update_log(f"Signál uložen do DB (ID: {last_id}): {signal_type} - {symbol} {action} (Label: {trade_label})", "INFO")
                 return last_id
             except sqlite3.Error as e:
                 logging.error(f"Chyba při ukládání signálu do DB: {e}.")
                 self._update_log(f"Chyba DB při ukládání signálu {symbol} {action}", "ERROR")
+                return None
+
+    def _save_trade_action(self, signal_id: int, action_type: str, trigger_event: str, params: dict | None = None):
+        params_json_str = json.dumps(params) if params else None
+        with db_lock, sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            try:
+                c.execute("""
+                    INSERT INTO trade_actions
+                        (signal_id, action_type, trigger_event, params_json, status)
+                    VALUES (?, ?, ?, ?, 'PENDING')
+                """, (signal_id, action_type, trigger_event, params_json_str))
+                conn.commit()
+                self._update_log(f"DB: Uložena akce '{action_type}' pro signal_id {signal_id}, trigger: {trigger_event}", "INFO")
+                return c.lastrowid
+            except sqlite3.Error as e:
+                self._update_log(f"DB Error: Nepodařilo se uložit akci {action_type} pro signal_id {signal_id}: {e}", "ERROR")
+                return None
 
     def _show_phone_selector(self):
         selector_window = ctk.CTkToplevel(self);selector_window.title("Správa telefonních čísel");selector_window.geometry("450x420");selector_window.transient(self);selector_window.grab_set();selector_window.resizable(False, False);selector_window.configure(fg_color=self.BG_COLOR);phone_numbers = self.session_manager.get_saved_phone_numbers();selected_phone_var = tk.StringVar(value=self.phone_entry_var.get());saved_frame = ctk.CTkFrame(selector_window, fg_color=self.FRAME_COLOR, corner_radius=8);saved_frame.pack(fill='x', padx=15, pady=(15,10));ctk.CTkLabel(saved_frame, text="Uložená čísla", font=self.FONT_BOLD).pack(anchor="w", padx=10, pady=(8,4));listbox_frame = ctk.CTkFrame(saved_frame, fg_color=self.ENTRY_BG_COLOR, corner_radius=6);listbox_frame.pack(fill="x", expand=True, padx=10, pady=(0,10));phone_listbox = tk.Listbox(listbox_frame, height=5, bg=self.ENTRY_BG_COLOR, fg=self.TEXT_COLOR,borderwidth=0, highlightthickness=0, selectbackground=self.ACCENT_COLOR,font=self.FONT_NORMAL, relief='flat', exportselection=False,selectforeground=self.TEXT_COLOR)
@@ -792,143 +774,95 @@ def get_new_signals():
 @flask_app.route('/report_trade', methods=['POST'])
 def report_trade():
     logging.info(f"Příchozí požadavek na /report_trade od {request.remote_addr}")
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+
+    db_signal_id = data.get('id')
+    ticket = data.get('ticket')
+
+    if db_signal_id is None or ticket is None:
+        return jsonify({"status": "error", "message": "Missing 'id' or 'ticket'"}), 400
+
     try:
-        data = request.get_json(silent=True)
-        if data is None:
-            logging.error(f"Chybný Content-Type nebo nevalidní JSON v /report_trade. Raw data: {request.data}");return jsonify({"status": "error", "message": "Invalid JSON or Content-Type"}), 400
+        db_signal_id = int(db_signal_id)
+        ticket = int(ticket)
+    except (ValueError, TypeError):
+        return jsonify({"status": "error", "message": "Invalid type for 'id' or 'ticket'"}), 400
 
-        logging.info(f"Přijatá data pro report: {data}")
-        db_signal_id = data.get('id')
-        ticket = data.get('ticket')
+    with db_lock, sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        conn.row_factory = sqlite3.Row
 
-        if db_signal_id is None:
-            logging.error("Chybí 'id' (databázové ID signálu) v přijatých datech pro /report_trade.");return jsonify({"status": "error", "message": "Missing 'id' (signal database ID)"}), 400
-        try:
-            db_signal_id = int(db_signal_id)
-            if ticket is not None:
-                ticket = int(ticket)
-        except ValueError:
-            logging.error(f"Neplatný typ pro 'id' nebo 'ticket': id={data.get('id')}, ticket={data.get('ticket')}");return jsonify({"status": "error", "message": "Invalid type for 'id' or 'ticket'"}), 400
+        # Find the signal being reported
+        c.execute("SELECT * FROM signals WHERE id = ?", (db_signal_id,))
+        signal_row = c.fetchone()
 
-        with db_lock, sqlite3.connect(DB_NAME) as conn:
-            conn.row_factory = sqlite3.Row
-            c = conn.cursor()
+        if not signal_row:
+            logging.warning(f"/report_trade: Signál ID {db_signal_id} nenalezen.")
+            return jsonify({"status": "error", "message": "Signal not found"}), 404
 
-            c.execute("SELECT * FROM signals WHERE id = ?", (db_signal_id,))
-            signal_row = c.fetchone()
+        # --- Trade Opening ---
+        if signal_row['status'] == 'new':
+            c.execute("UPDATE signals SET status = 'open', ticket = ? WHERE id = ?", (ticket, db_signal_id))
+            log_msg = f"Signál ID {db_signal_id} označen jako 'open' s ticketem {ticket}."
 
-            if not signal_row:
-                logging.warning(f"/report_trade: Signál ID {db_signal_id} nenalezen.");return jsonify({"status": "error", "message": f"Signal with ID {db_signal_id} not found"}), 404
+            # If it's a T1 trade, find pending actions and set their trigger ticket
+            if signal_row['trade_label'] == 'T1_AUTO' and signal_row['signal_group_id']:
+                c.execute("""
+                    UPDATE trade_actions
+                    SET trigger_ticket = ?
+                    WHERE signal_id IN (SELECT id FROM signals WHERE signal_group_id = ? AND trade_label = 'T2_AUTO')
+                      AND status = 'PENDING'
+                """, (ticket, signal_row['signal_group_id']))
+                if c.rowcount > 0:
+                    log_msg += f" {c.rowcount} akcí pro T2 bylo aktualizováno s trigger ticketem {ticket}."
 
-            log_msg_base = f"/report_trade: ID:{db_signal_id}, Ticket:{ticket}, Type:{signal_row['signal_type']}, Label:{signal_row['trade_label']}, Group:{signal_row['signal_group_id']}."
-
-            # --- Trade Closure Reporting ---
-            if 'closed_in_profit' in data:
-                closed_in_profit = data['closed_in_profit']
-                if ticket is None:
-                    logging.error(f"{log_msg_base} Chyba: 'ticket' chybí při hlášení uzavření obchodu.");return jsonify({"status": "error", "message": "Missing 'ticket' when reporting trade closure"}), 400
-
-                c.execute("UPDATE signals SET status = 'closed' WHERE id = ?", (db_signal_id,))
-                log_msg = f"{log_msg_base} Obchod označen jako 'closed'. Ziskový: {closed_in_profit}."
-
-                # If a profitable T1 trade is closed, activate functions on the corresponding T2 trade
-                if closed_in_profit and signal_row['trade_label'] == 'T1_AUTO' and signal_row['signal_group_id']:
-                    c.execute("""
-                        UPDATE signals
-                        SET functions_active = 'TRUE'
-                        WHERE signal_group_id = ? AND trade_label = 'T2_AUTO' AND status = 'open'
-                    """, (signal_row['signal_group_id'],))
-                    if c.rowcount > 0:
-                        log_msg += f" Funkce (BE/TS) aktivovány pro T2 obchod ve skupině {signal_row['signal_group_id']}."
-                    else:
-                        log_msg += f" Nebyl nalezen žádný otevřený T2 obchod pro aktivaci funkcí ve skupině {signal_row['signal_group_id']}."
-
-                conn.commit()
-                logging.info(log_msg)
-                return jsonify({"status": "ok", "message": "Trade closure reported."})
-
-            # --- New Trade Opening Reporting ---
-            if signal_row['status'] != 'new':
-                logging.warning(f"{log_msg_base} Signál již zpracován (status: {signal_row['status']}). Požadavek ignorován.");return jsonify({"status": "ok", "message": f"Signal ID {db_signal_id} already processed (status: {signal_row['status']})."}), 200
-
-            if ticket is None:
-                logging.error(f"{log_msg_base} Chyba: 'ticket' chybí pro otevírací signál.");return jsonify({"status": "error", "message": "Missing 'ticket' for opening signal"}), 400
-
-            if signal_row['signal_type'] in [SIGNAL_TYPE_INITIAL_T1, SIGNAL_TYPE_INITIAL_T2_DEFAULT, SIGNAL_TYPE_RE_ENTRY, SIGNAL_TYPE_STANDARD]:
-                c.execute("UPDATE signals SET ticket = ?, status = 'open' WHERE id = ?", (ticket, db_signal_id))
-                log_msg = f"{log_msg_base} Signál označen jako 'open' s ticketem {ticket}."
-
-                # If T1 is opened, set its ticket as the trigger for T2
-                if signal_row['trade_label'] == 'T1_AUTO' and signal_row['signal_group_id']:
-                    c.execute("""
-                        UPDATE signals
-                        SET be_trigger_target_ticket = ?, ts_trigger_target_ticket = ?
-                        WHERE signal_group_id = ? AND trade_label = 'T2_AUTO'
-                    """, (ticket, ticket, signal_row['signal_group_id']))
-                    if c.rowcount > 0:
-                        log_msg += f" T2 obchod ve skupině {signal_row['signal_group_id']} byl aktualizován s T1 ticketem {ticket} jako triggerem."
-
-            elif signal_row['signal_type'] == SIGNAL_TYPE_UPDATE_T2:
-                db_ticket = signal_row['ticket']
-                if ticket is not None:
-                    if db_ticket is not None and db_ticket != ticket:
-                        logging.warning(f"Pro UPDATE_T2 (ID: {db_signal_id}), MT4 reportoval ticket {ticket}, ale v DB je {db_ticket}. Používám ticket z DB.")
-                    elif db_ticket is None:
-                        c.execute("UPDATE signals SET ticket = ? WHERE id = ?", (ticket, db_signal_id));log_msg += f" Ticket {ticket} doplněn pro UPDATE_T2."
-                c.execute("UPDATE signals SET status = 'processed_update' WHERE id = ?", (db_signal_id,));log_msg = f"Signál ID: {db_signal_id} (Typ: {signal_type}) modifikace TP potvrzena. Status: 'processed_update'." + log_msg
-            else:
-                logging.warning(f"Neznámý signal_type '{signal_type}' pro signál ID: {db_signal_id} v /report_trade.");return jsonify({"status": "error", "message": f"Unknown signal_type '{signal_type}' for signal ID {db_signal_id}"}), 400
             conn.commit()
-            if c.rowcount > 0:
-                logging.info(log_msg);return jsonify({"status": "ok", "message": "Trade/Update reported successfully"})
-            else:
-                logging.error(f"Nepodařilo se aktualizovat záznam v DB pro signál ID: {db_signal_id} v /report_trade. Počet ovlivněných řádků: {c.rowcount}.");return jsonify({"status": "error", "message": "Failed to update signal in DB, no rows affected."}), 500
-    except json.JSONDecodeError:
-        logging.error(f"Chyba při dekódování JSON v /report_trade. Raw data: {request.data}");return jsonify({"status": "error", "message": "Invalid JSON format"}), 400
-    except sqlite3.Error as e:
-        logging.error(f"Chyba databáze při /report_trade: {e}");return jsonify({"status": "error", "message": "Database error during trade report"}), 500
-    except Exception as e:
-        logging.error(f"Obecná chyba při zpracování /report_trade: {e}\nRaw data: {request.data}");return jsonify({"status": "error", "message": f"Internal server error: {str(e)}"}), 500
+            logging.info(log_msg)
+            return jsonify({"status": "ok", "message": "Trade opened and actions updated."})
+
+        # --- Trade Modification/Update (e.g., TP change) ---
+        elif signal_row['signal_type'] == SIGNAL_TYPE_UPDATE_T2 and signal_row['status'] == 'new':
+             c.execute("UPDATE signals SET status = 'processed_update' WHERE id = ?", (db_signal_id,))
+             conn.commit()
+             logging.info(f"Signál ID {db_signal_id} (UPDATE_T2) označen jako zpracovaný.")
+             return jsonify({"status": "ok", "message": "Trade update processed."})
+
+    return jsonify({"status": "ok", "message": "Report received for already processed signal."})
+
+@flask_app.route('/update_action_status', methods=['POST'])
+def update_action_status():
+    data = request.get_json(silent=True)
+    if data is None or 'action_id' not in data or 'status' not in data:
+        return jsonify({"status": "error", "message": "Missing 'action_id' or 'status'"}), 400
+
+    try:
+        action_id = int(data['action_id'])
+        new_status = str(data['status'])
+        if new_status not in ['EXECUTED', 'CANCELLED']:
+            return jsonify({"status": "error", "message": "Invalid status value"}), 400
+    except (ValueError, TypeError):
+        return jsonify({"status": "error", "message": "Invalid data types"}), 400
+
+    with db_lock, sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE trade_actions SET status = ? WHERE id = ?", (new_status, action_id))
+        conn.commit()
+        if c.rowcount > 0:
+            logging.info(f"Stav akce ID {action_id} byl aktualizován na '{new_status}'.")
+            return jsonify({"status": "ok"})
+        else:
+            return jsonify({"status": "error", "message": "Action not found"}), 404
+
 def run_flask():
     try:
-        from waitress import serve;serve(flask_app, host='0.0.0.0', port=5000)
+        from waitress import serve
+        serve(flask_app, host='0.0.0.0', port=5000)
     except ImportError:
-        logging.warning("Waitress není nainstalován, používám vývojový server Flask. Pro produkci zvažte `pip install waitress`.");flask_app.run(host='0.0.0.0', port=5000, use_reloader=False, threaded=True)
+        logging.warning("Waitress není nainstalován, používám vývojový server Flask. Pro produkci zvažte `pip install waitress`.")
+        flask_app.run(host='0.0.0.0', port=5000, use_reloader=False, threaded=True)
     except Exception as e:
         logging.error(f"Nepodařilo se spustit Flask server: {e}")
-@flask_app.route('/active_trade_functions', methods=['GET'])
-def get_active_trade_functions():
-    ticket_id_str = request.args.get('ticket_id');logging.info(f"Příchozí požadavek na /active_trade_functions pro ticket_id: {ticket_id_str}")
-    if not ticket_id_str:
-        return jsonify({"status": "error", "message": "Missing 'ticket_id' query parameter"}), 400
-    try:
-        ticket_id = int(ticket_id_str)
-    except ValueError:
-        return jsonify({"status": "error", "message": "Invalid 'ticket_id' format, must be an integer"}), 400
-    functions_to_send = []
-    try:
-        with db_lock, sqlite3.connect(DB_NAME) as conn:
-            conn.row_factory = sqlite3.Row;c = conn.cursor()
-            c.execute("""
-                SELECT function_type, ts_type, params_json, tp_target_price
-                FROM trade_functions
-                WHERE ticket_id = ? AND is_active = 'TRUE'
-            """, (ticket_id,))
-            for row in c.fetchall():
-                func_data = dict(row)
-                if func_data['params_json']:
-                    try:
-                        func_data['params'] = json.loads(func_data['params_json']);del func_data['params_json']
-                    except json.JSONDecodeError:
-                        logging.warning(f"Could not parse params_json for ticket {ticket_id}, function {func_data['function_type']}: {func_data['params_json']}")
-                else:
-                    func_data['params'] = None
-                    if 'params_json' in func_data: del func_data['params_json']
-                functions_to_send.append(func_data)
-        logging.info(f"Nalezeno {len(functions_to_send)} aktivních funkcí pro ticket {ticket_id}.");return jsonify(functions_to_send)
-    except sqlite3.Error as e:
-        logging.error(f"Chyba databáze při /active_trade_functions pro ticket {ticket_id}: {e}");return jsonify({"status": "error", "message": "Database error"}), 500
-    except Exception as e:
-        logging.error(f"Obecná chyba při /active_trade_functions pro ticket {ticket_id}: {e}");return jsonify({"status": "error", "message": "Internal server error"}), 500
 if __name__ == "__main__":
     init_db();flask_thread = threading.Thread(target=run_flask, daemon=True);flask_thread.start();app = TelegramBotApp();app.mainloop()
