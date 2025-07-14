@@ -1,0 +1,44 @@
+{
+    "SniperPro": {
+        "trade_1": {
+            "sl_pips": 40.0,
+            "tp_pips": 40.0
+        },
+        "trade_2": {
+            "default_tp_pips": 200.0,
+            "reentry_tp_pips": 40.0
+        },
+        "functions": {
+            "be_active": true,
+            "ts_active": true,
+            "ts_type": "Classic",
+            "classic_ts": {
+                "start_pips": 20.0,
+                "step_pips": 10.0,
+                "distance_pips": 15.0
+            },
+            "convergent_ts": {
+                "activation_start_pips": 30.0,
+                "converge_factor": 0.5,
+                "min_stop_distance_pips": 10.0
+            }
+        }
+    },
+    "Standard": {
+        "functions": {
+            "be_active": false,
+            "ts_active": false,
+            "ts_type": "Classic",
+            "classic_ts": {
+                "start_pips": 20.0,
+                "step_pips": 10.0,
+                "distance_pips": 15.0
+            },
+            "convergent_ts": {
+                "activation_start_pips": 30.0,
+                "converge_factor": 0.5,
+                "min_stop_distance_pips": 10.0
+            }
+        }
+    }
+}

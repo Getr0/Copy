@@ -122,65 +122,67 @@ class SessionManager:
                 logging.error(f"Nepodařilo se smazat session soubor {session_path}: {e}");return False
         else:
             logging.warning(f"Session soubor {session_path} pro smazání nenalezen.");return False
-def parse_sniper_pro(message_text: str) -> dict | None:
-    message_text_cleaned = message_text.strip();re_ignore_pips = re.compile(r"^\d+\s+pips\s+ruining\s*✅", re.IGNORECASE);re_ignore_book_profit = re.compile(r"^Book\s+some\s+profit", re.IGNORECASE);re_ignore_reentry_closed = re.compile(r"^(Not\s+active\s+re\s*entry\s+closed|Closed\s+re\s*entry)", re.IGNORECASE)
-    if re_ignore_pips.search(message_text_cleaned) or re_ignore_book_profit.search(message_text_cleaned) or re_ignore_reentry_closed.search(message_text_cleaned):
-        return {'type': SIGNAL_TYPE_IGNORE, 'reason': 'Matched ignore pattern'}
-    re_reentry = re.compile(r"FOR\s+(GOLD|XAUUSD)\s+REE\s+ENTRY(?:[\s\S]*?)WITH\s+SL\s*[:\s]?\s*([\d\.]+)",re.IGNORECASE | re.DOTALL);match_reentry = re_reentry.search(message_text_cleaned)
-    if match_reentry:
-        symbol_raw = match_reentry.group(1).upper();symbol = "XAUUSD" if symbol_raw == "GOLD" else symbol_raw
-        try:
-            sl_price = float(match_reentry.group(2));return {'type': SIGNAL_TYPE_RE_ENTRY, 'symbol': symbol, 'sl_price': sl_price}
-        except ValueError:
-            logging.warning(f"Chyba konverze ceny SL v re-entry signálu: {match_reentry.group(2)}");return {'type': SIGNAL_TYPE_UNKNOWN, 'reason': 'Re-entry SL price conversion error'}
-    re_initial = re.compile(r"^(GOLD|XAUUSD)\s+(BUY|SELL|SEEL)\s+([\d\.]+)(?:\s+[\d\.]+)?(?:\s+small\s+lot)?$",re.IGNORECASE);match_initial = re_initial.search(message_text_cleaned)
-    if match_initial:
-        has_sl = re.search(r"Sl\s*[:\s]?\s*[\d\.]+", message_text_cleaned, re.IGNORECASE);has_tp = re.search(r"Tp\s*[:\s]?\s*[\d\.]+", message_text_cleaned, re.IGNORECASE)
-        if has_sl and has_tp:
-            logging.debug(f"Text odpovídá vzoru INITIAL, ale obsahuje SL/TP. Zkouším jako UPDATE_SLTP: {message_text_cleaned[:50]}")
-        else:
-            symbol_raw = match_initial.group(1).upper();symbol = "XAUUSD" if symbol_raw == "GOLD" else symbol_raw;action_raw = match_initial.group(2).upper();action = "SELL" if action_raw == "SEEL" else action_raw
-            try:
-                entry_price_ref = float(match_initial.group(3));return {'type': 'INITIAL', 'symbol': symbol, 'action': action, 'entry_price_ref': entry_price_ref}
-            except ValueError:
-                logging.warning(f"Chyba konverze referenční ceny v iniciálním signálu: {match_initial.group(3)}");return {'type': SIGNAL_TYPE_UNKNOWN, 'reason': 'Initial signal entry price conversion error'}
-    sl_pattern_general = r"Sl\s*[:\s]?\s*([\d\.]+)";match_sl_general = re.search(sl_pattern_general, message_text_cleaned, re.IGNORECASE)
-    if match_sl_general:
-        sl_price_str = match_sl_general.group(1);tp_matches_all = re.findall(r"Tp\s*[:\s]?\s*([\d\.]+)", message_text_cleaned, re.IGNORECASE)
-        if tp_matches_all:
-            try:
-                sl_price = float(sl_price_str);tp_prices = [float(tp_str) for tp_str in tp_matches_all];return {'type': 'UPDATE_SLTP', 'sl_price': sl_price, 'tp_prices': tp_prices}
-            except ValueError:
-                logging.warning(f"Chyba konverze cen v UPDATE_SLTP (general): SL='{sl_price_str}', TPs='{tp_matches_all}'");return {'type': SIGNAL_TYPE_UNKNOWN, 'reason': 'SL/TP update price conversion error (general)'}
-        else:
-            logging.debug(f"UPDATE_SLTP: Našlo SL='{sl_price_str}', ale žádné TP v celé zprávě. Nepovažuji za platný UPDATE_SLTP.")
-    logging.debug(f"Zpráva nebyla rozpoznána žádným parserem SniperPro: '{message_text_cleaned}'");return {'type': SIGNAL_TYPE_UNKNOWN, 'reason': 'No SniperPro pattern matched'}
-def parse_standard_signal(message_text: str) -> dict | None:
-    message_text_lower = message_text.lower();lines = message_text_lower.split('\n');cleaned_lines = [line for line in lines if not ("pips ruining" in line or "book some profit" in line or "closed re entry" in line or "not active" in line)];message_text_cleaned_for_standard = "\n".join(cleaned_lines).strip()
-    if not message_text_cleaned_for_standard:
-        return None
-    match_pattern1 = re.search(r'^(?P<action>buy|sell)\s+(?P<symbol>[a-z0-9/]+)\s+(?P<entry_price>[\d\.]+)',message_text_cleaned_for_standard,re.IGNORECASE)
-    if match_pattern1:
-        data = match_pattern1.groupdict();symbol = data['symbol'].upper().replace('/', '');action = data['action'].upper()
-        try:
-            entry_price = float(data['entry_price']);sl_match = re.search(r'sl\s*[:\s]?\s*([\d\.]+)', message_text_lower);sl = float(sl_match.group(1)) if sl_match else None;tp_matches = re.findall(r'tp\d?\s*[:\s]?\s*([\d\.]+)', message_text_lower);tp_values = [float(tp) for tp in tp_matches] if tp_matches else [];return {'type': 'STANDARD', 'symbol': symbol, 'action': action,'entry_price_ref': entry_price, 'sl_price': sl, 'tp_prices': tp_values}
-        except ValueError:
-            logging.warning(f"Chyba konverze čísel ve standardním parseru (formát 1) pro: {message_text}");return None
-    match_pattern2 = re.search(r'^(?P<symbol>[a-z0-9/]+)\s+(?P<action>buy|sell)(?:\s+(?:limit|stop))?\s+(?P<entry_price>[\d\.]+)',message_text_cleaned_for_standard,re.IGNORECASE)
-    if match_pattern2:
-        data = match_pattern2.groupdict();symbol = data['symbol'].upper().replace('/', '');action = data['action'].upper()
-        try:
-            entry_price = float(data['entry_price']);sl_match = re.search(r'sl\s*[:\s]?\s*([\d\.]+)', message_text_lower);sl = float(sl_match.group(1)) if sl_match else None;tp_matches = re.findall(r'tp\d?\s*[:\s]?\s*([\d\.]+)', message_text_lower);tp_values = [float(tp) for tp in tp_matches] if tp_matches else [];return {'type': 'STANDARD', 'symbol': symbol, 'action': action,'entry_price_ref': entry_price, 'sl_price': sl, 'tp_prices': tp_values}
-        except ValueError:
-            logging.warning(f"Chyba konverze čísel ve standardním parseru (formát 2) pro: {message_text}");return None
-    return None
+from parsing_logic import parse_sniper_pro, parse_standard_signal
+from parsing_logic import (SIGNAL_TYPE_IGNORE, SIGNAL_TYPE_UNKNOWN,
+                           SIGNAL_TYPE_RE_ENTRY, SIGNAL_TYPE_INITIAL,
+                           SIGNAL_TYPE_UPDATE_SLTP, SIGNAL_TYPE_STANDARD)
+
+CONFIG_FILE = 'parsing_config.json'
+
+def load_parsing_config():
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Return a default structure if file is missing or corrupt
+        return {
+            "SniperPro": {
+                "trade_1": {"sl_pips": 40.0, "tp_pips": 40.0},
+                "trade_2": {"default_tp_pips": 200.0, "reentry_tp_pips": 40.0},
+                "functions": {
+                    "be_active": True, "ts_active": True, "ts_type": "Classic",
+                    "classic_ts": {"start_pips": 20.0, "step_pips": 10.0, "distance_pips": 15.0},
+                    "convergent_ts": {"activation_start_pips": 30.0, "converge_factor": 0.5, "min_stop_distance_pips": 10.0}
+                }
+            },
+            "Standard": {
+                "functions": {
+                    "be_active": False, "ts_active": False, "ts_type": "Classic",
+                    "classic_ts": {"start_pips": 20.0, "step_pips": 10.0, "distance_pips": 15.0},
+                    "convergent_ts": {"activation_start_pips": 30.0, "converge_factor": 0.5, "min_stop_distance_pips": 10.0}
+                }
+            }
+        }
+
+def save_parsing_config(config):
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+    except IOError as e:
+        logging.error(f"Failed to save parsing config: {e}")
+
 class TelegramBotApp(ctk.CTk):
     def __init__(self):
-        super().__init__();self.title("Telegram Signal Monitor"); self.geometry("1000x700");ctk.set_appearance_mode("dark");self.BG_COLOR, self.FRAME_COLOR, self.TEXT_COLOR = "#2B2939", "#363347", "#EAEAEA";self.ACCENT_COLOR, self.ACCENT_HOVER_COLOR = "#E91E63", "#C2185B";self.ENTRY_BG_COLOR, self.RED_COLOR, self.RED_HOVER_COLOR = "#22212C", "#D32F2F", "#B71C1C";self.FONT_NORMAL, self.FONT_BOLD = ("Segoe UI", 12), ("Segoe UI", 12, "bold");self.FONT_TITLE, self.FONT_LOG = ("Segoe UI", 18, "bold"), ("Consolas", 10);self.session_manager = SessionManager();self.client_loop, self.client_thread, self.main_client = None, None, None;self.client_running = False;self.monitoring_handlers, self.monitoring_states = {}, {};self.parsing_methods = {};self.channel_contexts = {};self.processed_message_ids = set();self.message_id_lock = threading.Lock();self.function_defaults = {};self._init_default_function_settings();self._create_widgets();self.protocol("WM_DELETE_WINDOW", self._on_closing)
+        super().__init__();self.title("Telegram Signal Monitor"); self.geometry("1000x700");ctk.set_appearance_mode("dark");self.BG_COLOR, self.FRAME_COLOR, self.TEXT_COLOR = "#2B2939", "#363347", "#EAEAEA";self.ACCENT_COLOR, self.ACCENT_HOVER_COLOR = "#E91E63", "#C2185B";self.ENTRY_BG_COLOR, self.RED_COLOR, self.RED_HOVER_COLOR = "#22212C", "#D32F2F", "#B71C1C";self.FONT_NORMAL, self.FONT_BOLD = ("Segoe UI", 12), ("Segoe UI", 12, "bold");self.FONT_TITLE, self.FONT_LOG = ("Segoe UI", 18, "bold"), ("Consolas", 10);self.session_manager = SessionManager();self.client_loop, self.client_thread, self.main_client = None, None, None;self.client_running = False;self.monitoring_handlers, self.monitoring_states = {}, {};self.parsing_methods = {};self.channel_contexts = {};self.processed_message_ids = set();self.message_id_lock = threading.Lock()
+        self.parsing_config = load_parsing_config()
+        self.function_defaults = {};self._init_default_function_settings();self._create_widgets();self.protocol("WM_DELETE_WINDOW", self._on_closing)
+
     def _init_default_function_settings(self):
-        parser_types = ["SniperPro", "Standardní"]
+        self.parsing_config = load_parsing_config()
+        parser_types = list(self.parsing_config.keys())
         for p_type in parser_types:
-            self.function_defaults[p_type] = {'be_active': tk.BooleanVar(value=True),'ts_active': tk.BooleanVar(value=True),'ts_type': tk.StringVar(value="Classic"),'classic_ts_start_pips': tk.DoubleVar(value=20.0),'classic_ts_step_pips': tk.DoubleVar(value=10.0),'classic_ts_distance_pips': tk.DoubleVar(value=15.0),'convergent_activation_start_pips': tk.DoubleVar(value=30.0),'convergent_converge_factor': tk.DoubleVar(value=0.5),'convergent_min_stop_distance_pips': tk.DoubleVar(value=10.0)}
+            config = self.parsing_config[p_type]['functions']
+            self.function_defaults[p_type] = {
+                'be_active': tk.BooleanVar(value=config.get('be_active', False)),
+                'ts_active': tk.BooleanVar(value=config.get('ts_active', False)),
+                'ts_type': tk.StringVar(value=config.get('ts_type', 'Classic')),
+                'classic_ts_start_pips': tk.DoubleVar(value=config.get('classic_ts', {}).get('start_pips', 20.0)),
+                'classic_ts_step_pips': tk.DoubleVar(value=config.get('classic_ts', {}).get('step_pips', 10.0)),
+                'classic_ts_distance_pips': tk.DoubleVar(value=config.get('classic_ts', {}).get('distance_pips', 15.0)),
+                'convergent_activation_start_pips': tk.DoubleVar(value=config.get('convergent_ts', {}).get('activation_start_pips', 30.0)),
+                'convergent_converge_factor': tk.DoubleVar(value=config.get('convergent_ts', {}).get('converge_factor', 0.5)),
+                'convergent_min_stop_distance_pips': tk.DoubleVar(value=config.get('convergent_ts', {}).get('min_stop_distance_pips', 10.0))
+            }
     def _create_widgets(self):
         self.grid_columnconfigure(0, weight=1);self.grid_rowconfigure(3, weight=1);top_controls_frame = ctk.CTkFrame(self, fg_color="transparent");top_controls_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=(15,10));login_frame = ctk.CTkFrame(top_controls_frame, fg_color=self.FRAME_COLOR, corner_radius=8);login_frame.pack(side="left", fill="x", expand=True, padx=(0,10));login_frame.grid_columnconfigure(1, weight=1);ctk.CTkLabel(login_frame, text="Tel. číslo:", font=self.FONT_BOLD).grid(row=0, column=0, padx=(10,5), pady=10, sticky="w");self.phone_entry_var = tk.StringVar();self.phone_entry = ctk.CTkEntry(login_frame, textvariable=self.phone_entry_var, font=self.FONT_NORMAL,fg_color=self.ENTRY_BG_COLOR, border_width=0, corner_radius=6);self.phone_entry.grid(row=0, column=1, sticky="ew", padx=0, pady=10);manage_button = ctk.CTkButton(login_frame, text="Vybrat / Spravovat", command=self._show_phone_selector,font=self.FONT_NORMAL, fg_color=self.BG_COLOR, hover_color=self.ENTRY_BG_COLOR,corner_radius=6, width=140);manage_button.grid(row=0, column=2, padx=5, pady=10);connect_button = ctk.CTkButton(login_frame, text="Připojit", command=self._connect_telegram,font=self.FONT_BOLD, fg_color=self.ACCENT_COLOR, hover_color=self.ACCENT_HOVER_COLOR,corner_radius=6, width=100);connect_button.grid(row=0, column=3, padx=(0,10), pady=10);functions_button = ctk.CTkButton(top_controls_frame, text="⚙️ Funkce", command=self._show_functions_dialog,font=self.FONT_BOLD, fg_color=self.FRAME_COLOR, hover_color=self.ENTRY_BG_COLOR,corner_radius=6, width=120);functions_button.pack(side="left", padx=(0,0), pady=10);channels_header_frame = ctk.CTkFrame(self, fg_color="transparent");channels_header_frame.grid(row=2, column=0, sticky="ew", padx=15, pady=(10, 5));channels_header_frame.grid_columnconfigure(0, weight=1);ctk.CTkLabel(channels_header_frame, text="Kanály a skupiny", font=self.FONT_TITLE, anchor="w").grid(row=0, column=0, sticky="w");self.refresh_button = ctk.CTkButton(channels_header_frame, text="🔄 Obnovit", command=self._load_dialogs,state=tk.DISABLED, font=self.FONT_NORMAL, fg_color=self.FRAME_COLOR,hover_color=self.ENTRY_BG_COLOR, corner_radius=6, width=100);self.refresh_button.grid(row=0, column=1, sticky="e");self.channels_list_frame = ctk.CTkScrollableFrame(self, fg_color=self.FRAME_COLOR, corner_radius=8);self.channels_list_frame.grid(row=3, column=0, sticky="nsew", padx=15, pady=(0,10));self.channels_list_frame.grid_columnconfigure(0, weight=1);log_frame = ctk.CTkFrame(self, fg_color=self.FRAME_COLOR, corner_radius=8);log_frame.grid(row=4, column=0, sticky="ew", padx=15, pady=(0,15));log_frame.grid_columnconfigure(0, weight=1);ctk.CTkLabel(log_frame, text="Protokol událostí", font=self.FONT_BOLD, anchor="w").grid(row=0, column=0, padx=10, pady=(8,4), sticky="w");self.log_text = ctk.CTkTextbox(log_frame, state=tk.DISABLED, font=self.FONT_LOG,fg_color=self.ENTRY_BG_COLOR, corner_radius=6, border_width=0,wrap="word", height=120);self.log_text.grid(row=1, column=0, sticky="ew", padx=10, pady=(0,10))
     def _update_log(self, text, level="INFO"):
@@ -402,36 +404,101 @@ class TelegramBotApp(ctk.CTk):
             self._update_log(f"HANDLER_PROCEED: Zpráva ID: {message_id}, Dialog ID: {dialog_id}, Text: \"{message_text[:50].replace('\n', ' ')}\"", "ERROR");active_parse_method = parse_method;self._update_log(f"Nová zpráva z '{dialog.name}' (ID: {dialog_id}). Metoda: '{active_parse_method}'. Zpráva: \"{message_text[:100].replace('\n', ' ')}\"", "DEBUG");parsed_data = None
             if active_parse_method == "SniperPro":
                 parsed_data = parse_sniper_pro(message_text)
-            elif active_parse_method == "Standardní":
+            elif active_parse_method == "Standard":
                 parsed_data = parse_standard_signal(message_text)
-                if parsed_data:
-                    self._update_log(f"HANDLER_STD_SAVE: Zpráva ID: {message_id}, Data: {parsed_data}", "ERROR");self._update_log(f"STANDARD signál: {parsed_data['symbol']} {parsed_data['action']}", "INFO");std_signal_group_id = f"{dialog_id}_{parsed_data['symbol']}_STD_{int(datetime.datetime.now().timestamp())}";channel_context = self.channel_contexts.setdefault(dialog_id, {});channel_context['last_initial_symbol'] = parsed_data['symbol'];channel_context['last_initial_action'] = parsed_data['action'];channel_context['last_initial_entry_price'] = parsed_data['entry_price_ref'];channel_context['last_signal_group_id'] = std_signal_group_id;tp_prices = parsed_data.get('tp_prices', []);main_tp_price = tp_prices[0] if tp_prices else None;optional_tp2_price = tp_prices[1] if len(tp_prices) > 1 else None;self._save_signal_data(symbol=parsed_data['symbol'],action=parsed_data['action'],entry_price=parsed_data['entry_price_ref'],signal_group_id=std_signal_group_id,trade_label="STD_TRADE",signal_type=SIGNAL_TYPE_STANDARD,sl_price=parsed_data.get('sl_price'),tp_price=main_tp_price,tp2_price_optional=optional_tp2_price);return
             else:
                 self._update_log(f"Neznámá metoda parsování '{active_parse_method}' pro '{dialog.name}'. Zpráva ignorována.", "WARNING");return
+
             if not parsed_data or parsed_data.get('type') == SIGNAL_TYPE_UNKNOWN:
                 self._update_log(f"Zpráva z '{dialog.name}' ({active_parse_method}) nebyla rozpoznána nebo neznámého typu. Důvod: {parsed_data.get('reason', 'N/A') if parsed_data else 'Parser nevrátil data'}", "DEBUG");return
             if parsed_data['type'] == SIGNAL_TYPE_IGNORE:
                 self._update_log(f"Zpráva z '{dialog.name}' ({active_parse_method}) ignorována: {parsed_data.get('reason', '')}", "DEBUG");return
-            channel_context = self.channel_contexts.setdefault(dialog_id, {});current_signal_type_from_parser = parsed_data['type']
-            if current_signal_type_from_parser == 'INITIAL':
-                symbol = parsed_data['symbol'];action = parsed_data['action'];entry_price_ref = parsed_data['entry_price_ref'];signal_group_id = f"{dialog_id}_{symbol}_{action}_{int(datetime.datetime.now().timestamp())}";channel_context['last_initial_symbol'] = symbol;channel_context['last_initial_action'] = action;channel_context['last_initial_entry_price'] = entry_price_ref;channel_context['last_signal_group_id'] = signal_group_id;self._update_log(f"SNIPERPRO INITIAL: {symbol} {action} @ {entry_price_ref}. GroupID: {signal_group_id}", "INFO");self._update_log(f"HANDLER_SNIPER_INITIAL_SAVE_T1: Zpráva ID: {message_id}, GroupID: {signal_group_id}", "DEBUG");t1_signal_db_id = self._save_signal_data(symbol=symbol, action=action, entry_price=entry_price_ref,signal_group_id=signal_group_id, trade_label="T1_AUTO",signal_type=SIGNAL_TYPE_INITIAL_T1,sl_pips=DEFAULT_SL_PIPS, tp_pips=INITIAL_TRADE_1_TP_PIPS,is_tp1_for_be_ts=True);self._update_log(f"HANDLER_SNIPER_INITIAL_SAVE_T2: Zpráva ID: {message_id}, GroupID: {signal_group_id}", "DEBUG");t2_signal_db_id = self._save_signal_data(symbol=symbol, action=action, entry_price=entry_price_ref,signal_group_id=signal_group_id, trade_label="T2_AUTO",signal_type=SIGNAL_TYPE_INITIAL_T2_DEFAULT,sl_pips=DEFAULT_SL_PIPS, tp_pips=INITIAL_TRADE_2_DEFAULT_TP_PIPS,be_active=self.function_defaults["SniperPro"]['be_active'].get(),ts_active=self.function_defaults["SniperPro"]['ts_active'].get())
-                if t2_signal_db_id:
-                    sniper_pro_defaults = self.function_defaults["SniperPro"]
-                    if sniper_pro_defaults['be_active'].get():
-                        be_params = {"offset_pips": 1.0};self._save_trade_function_definition(signal_db_id=t2_signal_db_id, ticket_id=None,function_type="BE", ts_type=None,activation_condition_type="ON_CLOSE_TICKET", activation_target_ticket=None,params=be_params)
-                    if sniper_pro_defaults['ts_active'].get():
-                        ts_type = sniper_pro_defaults['ts_type'].get();ts_params = {};tp2_target_price_for_convergent = None
-                        if action == "BUY":
-                            tp2_target_price_for_convergent = entry_price_ref + (INITIAL_TRADE_2_DEFAULT_TP_PIPS * (PIP_SIZE_XAUUSD if symbol == "XAUUSD" else 0.0001))
-                        elif action == "SELL":
-                            tp2_target_price_for_convergent = entry_price_ref - (INITIAL_TRADE_2_DEFAULT_TP_PIPS * (PIP_SIZE_XAUUSD if symbol == "XAUUSD" else 0.0001))
-                        if ts_type == "Classic":
-                            ts_params = {"trail_start_pips": sniper_pro_defaults['classic_ts_start_pips'].get(),"trail_step_pips": sniper_pro_defaults['classic_ts_step_pips'].get(),"trail_distance_pips": sniper_pro_defaults['classic_ts_distance_pips'].get()}
-                        elif ts_type == "Convergent":
-                            ts_params = {"activation_start_pips": sniper_pro_defaults['convergent_activation_start_pips'].get(),"converge_factor": sniper_pro_defaults['convergent_converge_factor'].get(),"min_stop_distance_pips": sniper_pro_defaults['convergent_min_stop_distance_pips'].get()}
-                        self._save_trade_function_definition(signal_db_id=t2_signal_db_id, ticket_id=None,function_type="TS", ts_type=ts_type,activation_condition_type="ON_CLOSE_TICKET", activation_target_ticket=None,params=ts_params,tp_target_price=tp2_target_price_for_convergent if ts_type == "Convergent" else None)
-                else:
-                    self._update_log(f"Chyba: T2 signál pro GroupID {signal_group_id} nebyl úspěšně uložen, BE/TS funkce nebyly vytvořeny.", "ERROR")
+
+            channel_context = self.channel_contexts.setdefault(dialog_id, {})
+            current_signal_type_from_parser = parsed_data['type']
+
+            # --- Standard Signal Processing ---
+            if current_signal_type_from_parser == SIGNAL_TYPE_STANDARD:
+                self._update_log(f"HANDLER_STD_SAVE: Zpráva ID: {message_id}, Data: {parsed_data}", "ERROR");self._update_log(f"STANDARD signál: {parsed_data['symbol']} {parsed_data['action']}", "INFO");std_signal_group_id = f"{dialog_id}_{parsed_data['symbol']}_STD_{int(datetime.datetime.now().timestamp())}";channel_context['last_initial_symbol'] = parsed_data['symbol'];channel_context['last_initial_action'] = parsed_data['action'];channel_context['last_initial_entry_price'] = parsed_data['entry_price_ref'];channel_context['last_signal_group_id'] = std_signal_group_id;tp_prices = parsed_data.get('tp_prices', []);main_tp_price = tp_prices[0] if tp_prices else None;optional_tp2_price = tp_prices[1] if len(tp_prices) > 1 else None;self._save_signal_data(symbol=parsed_data['symbol'],action=parsed_data['action'],entry_price=parsed_data['entry_price_ref'],signal_group_id=std_signal_group_id,trade_label="STD_TRADE",signal_type=SIGNAL_TYPE_STANDARD,sl_price=parsed_data.get('sl_price'),tp_price=main_tp_price,tp2_price_optional=optional_tp2_price);return
+
+            # --- SniperPro Signal Processing ---
+            if active_parse_method == "SniperPro":
+                config = self.parsing_config.get("SniperPro", {})
+                if not config:
+                    self._update_log("Chyba: Chybí konfigurace pro SniperPro v parsing_config.json", "ERROR"); return
+
+                if current_signal_type_from_parser == SIGNAL_TYPE_INITIAL:
+                    symbol = parsed_data['symbol'];action = parsed_data['action'];entry_price_ref = parsed_data['entry_price_ref']
+                    signal_group_id = f"{dialog_id}_{symbol}_{action}_{int(datetime.datetime.now().timestamp())}"
+                    channel_context.update({
+                        'last_initial_symbol': symbol, 'last_initial_action': action,
+                        'last_initial_entry_price': entry_price_ref, 'last_signal_group_id': signal_group_id
+                    })
+                    self._update_log(f"SNIPERPRO INITIAL: {symbol} {action} @ {entry_price_ref}. GroupID: {signal_group_id}", "INFO")
+
+                    # Trade 1 (TP1)
+                    t1_config = config.get('trade_1', {})
+                    t1_signal_db_id = self._save_signal_data(
+                        symbol=symbol, action=action, entry_price=entry_price_ref,
+                        signal_group_id=signal_group_id, trade_label="T1_AUTO",
+                        signal_type=SIGNAL_TYPE_INITIAL_T1, sl_pips=t1_config.get('sl_pips'),
+                        tp_pips=t1_config.get('tp_pips'), is_tp1_for_be_ts=True
+                    )
+
+                    # Trade 2 (TP2)
+                    t2_config = config.get('trade_2', {})
+                    func_config = config.get('functions', {})
+                    t2_signal_db_id = self._save_signal_data(
+                        symbol=symbol, action=action, entry_price=entry_price_ref,
+                        signal_group_id=signal_group_id, trade_label="T2_AUTO",
+                        signal_type=SIGNAL_TYPE_INITIAL_T2_DEFAULT, sl_pips=t1_config.get('sl_pips'), # Same SL as T1
+                        tp_pips=t2_config.get('default_tp_pips'),
+                        be_active=func_config.get('be_active', False),
+                        ts_active=func_config.get('ts_active', False)
+                    )
+
+                    if t2_signal_db_id:
+                        if func_config.get('be_active'):
+                            be_params = {"offset_pips": 1.0}
+                            self._save_trade_function_definition(
+                                signal_db_id=t2_signal_db_id, function_type="BE",
+                                activation_condition_type="ON_CLOSE_TICKET", params=be_params
+                            )
+                        if func_config.get('ts_active'):
+                            ts_type = func_config.get('ts_type', 'Classic')
+                            ts_params_config = func_config.get(f"{ts_type.lower()}_ts", {})
+                            ts_params = {}
+                            if ts_type == "Classic":
+                                ts_params = {
+                                    "trail_start_pips": ts_params_config.get('start_pips'),
+                                    "trail_step_pips": ts_params_config.get('step_pips'),
+                                    "trail_distance_pips": ts_params_config.get('distance_pips')
+                                }
+                            elif ts_type == "Convergent":
+                                ts_params = {
+                                    "activation_start_pips": ts_params_config.get('activation_start_pips'),
+                                    "converge_factor": ts_params_config.get('converge_factor'),
+                                    "min_stop_distance_pips": ts_params_config.get('min_stop_distance_pips')
+                                }
+
+                            # Calculate target price for Convergent TS
+                            tp2_target_price = None
+                            if ts_type == "Convergent":
+                                default_tp_pips = t2_config.get('default_tp_pips')
+                                pip_size = PIP_SIZE_XAUUSD if symbol == "XAUUSD" else 0.0001
+                                if action == "BUY":
+                                    tp2_target_price = entry_price_ref + (default_tp_pips * pip_size)
+                                elif action == "SELL":
+                                    tp2_target_price = entry_price_ref - (default_tp_pips * pip_size)
+
+                            self._save_trade_function_definition(
+                                signal_db_id=t2_signal_db_id, function_type="TS",
+                                ts_type=ts_type, activation_condition_type="ON_CLOSE_TICKET",
+                                params=ts_params, tp_target_price=tp2_target_price
+                            )
+                    else:
+                        self._update_log(f"Chyba: T2 signál pro GroupID {signal_group_id} nebyl úspěšně uložen, BE/TS funkce nebyly vytvořeny.", "ERROR")
+
             elif current_signal_type_from_parser == 'UPDATE_SLTP':
                 active_symbol = channel_context.get('last_initial_symbol');active_action = channel_context.get('last_initial_action');active_group_id = channel_context.get('last_signal_group_id')
                 if not (active_symbol and active_action and active_group_id):
@@ -600,8 +667,11 @@ class TelegramBotApp(ctk.CTk):
         if self.client_loop and self.client_loop.is_closed():
             self._update_log(f"Asyncio smyčka ({id(self.client_loop)}) byla uzavřena (kontrola v shutdown).", "DEBUG")
         self.client_loop = None;self._update_log("Telegram klient a jeho vlákno byly ukončeny.", "INFO");self.after(0, lambda: [widget.destroy() for widget in self.channels_list_frame.winfo_children()])
-    def _save_trade_function_definition(self, signal_db_id: int, ticket_id: int | None,function_type: str, ts_type: str | None,activation_condition_type: str, activation_target_ticket: int | None,params: dict, tp_target_price: float | None = None):
-        params_json_str = json.dumps(params) if params else None;is_active_str = "FALSE"
+    def _save_trade_function_definition(self, signal_db_id: int, function_type: str, activation_condition_type: str, params: dict, ts_type: str | None = None, tp_target_price: float | None = None, activation_target_ticket: int | None = None):
+        params_json_str = json.dumps(params) if params else None
+        is_active_str = "FALSE"
+        ticket_id = None # Initially null, updated when the trade is opened
+
         with db_lock, sqlite3.connect(DB_NAME) as conn:
             c = conn.cursor()
             try:
@@ -611,33 +681,136 @@ class TelegramBotApp(ctk.CTk):
                          activation_condition_type, activation_target_ticket,
                          is_active, params_json, tp_target_price, status_message)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (signal_db_id, ticket_id, function_type, ts_type,activation_condition_type, activation_target_ticket,is_active_str, params_json_str, tp_target_price,f"Pending: {activation_condition_type} on ticket {activation_target_ticket if activation_target_ticket else 'N/A'}"));conn.commit();self._update_log(f"DB: Saved {function_type}{f' ({ts_type})' if ts_type else ''} function for signal_db_id {signal_db_id}. Condition: {activation_condition_type}", "INFO");return c.lastrowid
+                """, (signal_db_id, ticket_id, function_type, ts_type,
+                      activation_condition_type, activation_target_ticket,
+                      is_active_str, params_json_str, tp_target_price,
+                      f"Pending: {activation_condition_type} on ticket {activation_target_ticket if activation_target_ticket else 'N/A'}"))
+                conn.commit()
+                self._update_log(f"DB: Saved {function_type}{f' ({ts_type})' if ts_type else ''} function for signal_db_id {signal_db_id}. Condition: {activation_condition_type}", "INFO")
+                return c.lastrowid
             except sqlite3.Error as e:
-                self._update_log(f"DB Error: Failed to save function {function_type} for signal_db_id {signal_db_id}: {e}", "ERROR");return None
+                self._update_log(f"DB Error: Failed to save function {function_type} for signal_db_id {signal_db_id}: {e}", "ERROR")
+                return None
+
     def _show_functions_dialog(self):
-        dialog = ctk.CTkToplevel(self);dialog.title("Výchozí Nastavení Funkcí Obchodů");dialog.geometry("650x550");dialog.transient(self);dialog.grab_set();dialog.resizable(True, True);dialog.configure(fg_color=self.BG_COLOR);content_frame = ctk.CTkFrame(dialog, fg_color="transparent");content_frame.pack(padx=15, pady=15, fill="both", expand=True);content_frame.grid_columnconfigure(1, weight=1);ctk.CTkLabel(content_frame, text="Typ parsování:", font=self.FONT_BOLD).grid(row=0, column=0, padx=(0,5), pady=10, sticky="w");self.current_parser_type_var_dialog = tk.StringVar(value=list(self.function_defaults.keys())[0] if self.function_defaults else "");parser_type_options = list(self.function_defaults.keys())
-        if not parser_type_options:
-            parser_type_options = ["SniperPro", "Standardní"]
-        parser_type_dropdown = ctk.CTkComboBox(content_frame, variable=self.current_parser_type_var_dialog,values=parser_type_options, state="readonly",font=self.FONT_NORMAL, command=self._on_parser_type_selected_in_dialog);parser_type_dropdown.grid(row=0, column=1, columnspan=3, padx=0, pady=10, sticky="ew");self.settings_area_frame = ctk.CTkFrame(content_frame, fg_color=self.FRAME_COLOR, corner_radius=6);self.settings_area_frame.grid(row=1, column=0, columnspan=4, sticky="nsew", pady=(5,10));self.settings_area_frame.grid_columnconfigure(1, weight=1);content_frame.grid_rowconfigure(1, weight=1);self._on_parser_type_selected_in_dialog(self.current_parser_type_var_dialog.get());dialog.attributes("-topmost", True)
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Výchozí Nastavení Funkcí Obchodů")
+        dialog.geometry("650x550")
+        dialog.transient(self); dialog.grab_set(); dialog.resizable(True, True)
+        dialog.configure(fg_color=self.BG_COLOR)
+
+        # This will hold the tk variables for the dialog
+        self.dialog_vars = {}
+
+        content_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        content_frame.pack(padx=15, pady=15, fill="both", expand=True)
+        content_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(content_frame, text="Typ parsování:", font=self.FONT_BOLD).grid(row=0, column=0, padx=(0,5), pady=10, sticky="w")
+
+        parser_type_options = list(self.parsing_config.keys())
+        self.current_parser_type_var_dialog = tk.StringVar(value=parser_type_options[0] if parser_type_options else "")
+
+        parser_type_dropdown = ctk.CTkComboBox(content_frame, variable=self.current_parser_type_var_dialog,
+                                               values=parser_type_options, state="readonly",
+                                               font=self.FONT_NORMAL, command=self._on_parser_type_selected_in_dialog)
+        parser_type_dropdown.grid(row=0, column=1, columnspan=3, padx=0, pady=10, sticky="ew")
+
+        self.settings_area_frame = ctk.CTkFrame(content_frame, fg_color=self.FRAME_COLOR, corner_radius=6)
+        self.settings_area_frame.grid(row=1, column=0, columnspan=4, sticky="nsew", pady=(5,10))
+        self.settings_area_frame.grid_columnconfigure(1, weight=1)
+        content_frame.grid_rowconfigure(1, weight=1)
+
+        # Save button
+        save_button = ctk.CTkButton(content_frame, text="Uložit a Zavřít", command=lambda: self._save_functions_dialog(dialog))
+        save_button.grid(row=2, column=0, columnspan=4, pady=(10,0), sticky="ew")
+
+        self._on_parser_type_selected_in_dialog(self.current_parser_type_var_dialog.get())
+        dialog.attributes("-topmost", True)
+
     def _on_parser_type_selected_in_dialog(self, selected_parser_type: str):
         for widget in self.settings_area_frame.winfo_children():
             widget.destroy()
-        if not selected_parser_type or selected_parser_type not in self.function_defaults:
-            ctk.CTkLabel(self.settings_area_frame, text="Vyberte platný typ parsování.", font=self.FONT_NORMAL).pack(padx=10, pady=10);return
-        defaults = self.function_defaults[selected_parser_type];ctk.CTkCheckBox(self.settings_area_frame, text="Aktivovat Breakeven (pro TP2)",variable=defaults['be_active'], font=self.FONT_NORMAL,fg_color=self.ACCENT_COLOR, hover_color=self.ACCENT_HOVER_COLOR).grid(row=0, column=0, columnspan=2, padx=10, pady=7, sticky="w");ts_activation_check = ctk.CTkCheckBox(self.settings_area_frame, text="Aktivovat Trailing Stop (pro TP2)",variable=defaults['ts_active'], font=self.FONT_NORMAL,fg_color=self.ACCENT_COLOR, hover_color=self.ACCENT_HOVER_COLOR,command=lambda: self._on_ts_type_changed_in_dialog(selected_parser_type));ts_activation_check.grid(row=1, column=0, padx=10, pady=7, sticky="w");self.ts_type_dropdown_dialog = ctk.CTkComboBox(self.settings_area_frame, variable=defaults['ts_type'],values=["Classic", "Convergent"], state="readonly",font=self.FONT_NORMAL, width=150,command=lambda choice: self._on_ts_type_changed_in_dialog(selected_parser_type));self.ts_type_dropdown_dialog.grid(row=1, column=1, padx=10, pady=7, sticky="w");self.ts_type_dropdown_dialog.configure(state=tk.NORMAL if defaults['ts_active'].get() else tk.DISABLED);self.ts_params_frame_dialog = ctk.CTkFrame(self.settings_area_frame, fg_color="transparent");self.ts_params_frame_dialog.grid(row=2, column=0, columnspan=4, sticky="nsew", padx=5, pady=5);self.ts_params_frame_dialog.grid_columnconfigure(1, weight=1);self.ts_params_frame_dialog.grid_columnconfigure(3, weight=1);self._on_ts_type_changed_in_dialog(selected_parser_type)
-    def _on_ts_type_changed_in_dialog(self, selected_parser_type: str):
+
+        if not selected_parser_type or selected_parser_type not in self.parsing_config:
+            ctk.CTkLabel(self.settings_area_frame, text="Vyberte platný typ parsování.", font=self.FONT_NORMAL).pack(padx=10, pady=10)
+            return
+
+        config = self.parsing_config[selected_parser_type].get('functions', {})
+        self.dialog_vars = {
+            'be_active': tk.BooleanVar(value=config.get('be_active', False)),
+            'ts_active': tk.BooleanVar(value=config.get('ts_active', False)),
+            'ts_type': tk.StringVar(value=config.get('ts_type', 'Classic')),
+            'classic_ts_start_pips': tk.DoubleVar(value=config.get('classic_ts', {}).get('start_pips', 20.0)),
+            'classic_ts_step_pips': tk.DoubleVar(value=config.get('classic_ts', {}).get('step_pips', 10.0)),
+            'classic_ts_distance_pips': tk.DoubleVar(value=config.get('classic_ts', {}).get('distance_pips', 15.0)),
+            'convergent_activation_start_pips': tk.DoubleVar(value=config.get('convergent_ts', {}).get('activation_start_pips', 30.0)),
+            'convergent_converge_factor': tk.DoubleVar(value=config.get('convergent_ts', {}).get('converge_factor', 0.5)),
+            'convergent_min_stop_distance_pips': tk.DoubleVar(value=config.get('convergent_ts', {}).get('min_stop_distance_pips', 10.0))
+        }
+
+        # --- Create Widgets ---
+        be_check = ctk.CTkCheckBox(self.settings_area_frame, text="Aktivovat Breakeven", variable=self.dialog_vars['be_active'], font=self.FONT_NORMAL, fg_color=self.ACCENT_COLOR, hover_color=self.ACCENT_HOVER_COLOR)
+        be_check.grid(row=0, column=0, columnspan=2, padx=10, pady=7, sticky="w")
+
+        ts_activation_check = ctk.CTkCheckBox(self.settings_area_frame, text="Aktivovat Trailing Stop", variable=self.dialog_vars['ts_active'], font=self.FONT_NORMAL, fg_color=self.ACCENT_COLOR, hover_color=self.ACCENT_HOVER_COLOR, command=self._update_ts_params_visibility)
+        ts_activation_check.grid(row=1, column=0, padx=10, pady=7, sticky="w")
+
+        self.ts_type_dropdown_dialog = ctk.CTkComboBox(self.settings_area_frame, variable=self.dialog_vars['ts_type'], values=["Classic", "Convergent"], state="readonly", font=self.FONT_NORMAL, width=150, command=self._update_ts_params_visibility)
+        self.ts_type_dropdown_dialog.grid(row=1, column=1, padx=10, pady=7, sticky="w")
+
+        self.ts_params_frame_dialog = ctk.CTkFrame(self.settings_area_frame, fg_color="transparent")
+        self.ts_params_frame_dialog.grid(row=2, column=0, columnspan=4, sticky="nsew", padx=5, pady=5)
+        self.ts_params_frame_dialog.grid_columnconfigure(1, weight=1)
+        self.ts_params_frame_dialog.grid_columnconfigure(3, weight=1)
+
+        self._update_ts_params_visibility()
+
+    def _update_ts_params_visibility(self, *args):
+        # Clear previous params
         for widget in self.ts_params_frame_dialog.winfo_children():
             widget.destroy()
-        defaults = self.function_defaults[selected_parser_type]
-        if hasattr(self, 'ts_type_dropdown_dialog'):
-             self.ts_type_dropdown_dialog.configure(state=tk.NORMAL if defaults['ts_active'].get() else tk.DISABLED)
-        if not defaults['ts_active'].get():
+
+        is_ts_active = self.dialog_vars['ts_active'].get()
+        self.ts_type_dropdown_dialog.configure(state=tk.NORMAL if is_ts_active else tk.DISABLED)
+
+        if not is_ts_active:
             return
-        selected_ts_type = defaults['ts_type'].get()
+
+        selected_ts_type = self.dialog_vars['ts_type'].get()
+
         if selected_ts_type == "Classic":
-            ctk.CTkLabel(self.ts_params_frame_dialog, text="Classic TS - Start (pips):", font=self.FONT_NORMAL).grid(row=0, column=0, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['classic_ts_start_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=1, padx=5, pady=5, sticky="w");ctk.CTkLabel(self.ts_params_frame_dialog, text="Krok (pips):", font=self.FONT_NORMAL).grid(row=0, column=2, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['classic_ts_step_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=3, padx=5, pady=5, sticky="w");ctk.CTkLabel(self.ts_params_frame_dialog, text="Distance (pips):", font=self.FONT_NORMAL).grid(row=1, column=0, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['classic_ts_distance_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+            ctk.CTkLabel(self.ts_params_frame_dialog, text="Classic TS - Start (pips):", font=self.FONT_NORMAL).grid(row=0, column=0, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=self.dialog_vars['classic_ts_start_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=1, padx=5, pady=5, sticky="w");ctk.CTkLabel(self.ts_params_frame_dialog, text="Krok (pips):", font=self.FONT_NORMAL).grid(row=0, column=2, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=self.dialog_vars['classic_ts_step_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=3, padx=5, pady=5, sticky="w");ctk.CTkLabel(self.ts_params_frame_dialog, text="Distance (pips):", font=self.FONT_NORMAL).grid(row=1, column=0, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=self.dialog_vars['classic_ts_distance_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=1, column=1, padx=5, pady=5, sticky="w")
         elif selected_ts_type == "Convergent":
-            ctk.CTkLabel(self.ts_params_frame_dialog, text="Convergent TS - Aktivace (pips):", font=self.FONT_NORMAL).grid(row=0, column=0, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['convergent_activation_start_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=1, padx=5, pady=5, sticky="w");ctk.CTkLabel(self.ts_params_frame_dialog, text="Converge Faktor (0-1):", font=self.FONT_NORMAL).grid(row=0, column=2, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['convergent_converge_factor'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=3, padx=5, pady=5, sticky="w");ctk.CTkLabel(self.ts_params_frame_dialog, text="Min. odstup SL (pips):", font=self.FONT_NORMAL).grid(row=1, column=0, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=defaults['convergent_min_stop_distance_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+            ctk.CTkLabel(self.ts_params_frame_dialog, text="Convergent TS - Aktivace (pips):", font=self.FONT_NORMAL).grid(row=0, column=0, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=self.dialog_vars['convergent_activation_start_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=1, padx=5, pady=5, sticky="w");ctk.CTkLabel(self.ts_params_frame_dialog, text="Converge Faktor (0-1):", font=self.FONT_NORMAL).grid(row=0, column=2, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=self.dialog_vars['convergent_converge_factor'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=0, column=3, padx=5, pady=5, sticky="w");ctk.CTkLabel(self.ts_params_frame_dialog, text="Min. odstup SL (pips):", font=self.FONT_NORMAL).grid(row=1, column=0, padx=5, pady=5, sticky="w");ctk.CTkEntry(self.ts_params_frame_dialog, textvariable=self.dialog_vars['convergent_min_stop_distance_pips'], font=self.FONT_NORMAL, width=80, fg_color=self.ENTRY_BG_COLOR).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+    def _save_functions_dialog(self, dialog):
+        parser_type = self.current_parser_type_var_dialog.get()
+        if not parser_type:
+            dialog.destroy()
+            return
+
+        # Update the main config object from the dialog's tk variables
+        self.parsing_config[parser_type]['functions'] = {
+            'be_active': self.dialog_vars['be_active'].get(),
+            'ts_active': self.dialog_vars['ts_active'].get(),
+            'ts_type': self.dialog_vars['ts_type'].get(),
+            'classic_ts': {
+                'start_pips': self.dialog_vars['classic_ts_start_pips'].get(),
+                'step_pips': self.dialog_vars['classic_ts_step_pips'].get(),
+                'distance_pips': self.dialog_vars['classic_ts_distance_pips'].get()
+            },
+            'convergent_ts': {
+                'activation_start_pips': self.dialog_vars['convergent_activation_start_pips'].get(),
+                'converge_factor': self.dialog_vars['convergent_converge_factor'].get(),
+                'min_stop_distance_pips': self.dialog_vars['convergent_min_stop_distance_pips'].get()
+            }
+        }
+
+        save_parsing_config(self.parsing_config)
+        self._init_default_function_settings() # Reload settings into the app
+        self._update_log(f"Nastavení funkcí pro '{parser_type}' bylo uloženo.", "INFO")
+        dialog.destroy()
     def _on_closing(self):
         self._update_log("Aplikace se ukončuje...");
         if self.client_running or (self.client_thread and self.client_thread.is_alive()):
